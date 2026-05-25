@@ -95,11 +95,25 @@ app.get('/api/resolve-link', async (req, res) => {
         console.log(`✅ Short link resolved: ${resolvedUrl}`);
 
         // Extract shopId & itemId từ URL
-        const shopMatch = resolvedUrl.match(/\/(\d+)\//);
-        const itemMatch = resolvedUrl.match(/\/(\d+)\/?$/);
+        // Format: /shopname/shopid/itemid or /shopname/shopid/itemid?...
+        let shopId, itemId;
 
-        if (!shopMatch || !itemMatch) {
-            console.log('❌ Cannot extract shop/item ID');
+        // Try format 1: /shopname/shopid/itemid
+        const match1 = resolvedUrl.match(/\/([^\/]+)\/(\d+)\/(\d+)/);
+        if (match1) {
+            shopId = match1[2];
+            itemId = match1[3];
+        } else {
+            // Try format 2: -i.shopid.itemid
+            const match2 = resolvedUrl.match(/-i\.(\d+)\.(\d+)/);
+            if (match2) {
+                shopId = match2[1];
+                itemId = match2[2];
+            }
+        }
+
+        if (!shopId || !itemId) {
+            console.log(`❌ Cannot extract shop/item ID from: ${resolvedUrl}`);
             return res.json({
                 originalUrl: url,
                 resolvedUrl: resolvedUrl,
@@ -107,9 +121,6 @@ app.get('/api/resolve-link', async (req, res) => {
                 cached: false
             });
         }
-
-        const shopId = shopMatch[1];
-        const itemId = itemMatch[1];
 
         console.log(`📝 Extracted: shop=${shopId}, item=${itemId}`);
 
