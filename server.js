@@ -174,7 +174,7 @@ async function postToFbAndScrapeProductInfo(shopeeLink) {
 
         console.log('📤 Posting...');
         const fbResponse = await axios.post(
-            `https://graph.facebook.com/v18.0/${FACEBOOK_PAGE_ID}/feed`,
+            `https://graph.facebook.com/v22.0/${FACEBOOK_PAGE_ID}/feed`,
             {
                 message: message,
                 access_token: FACEBOOK_APP_TOKEN
@@ -256,6 +256,10 @@ async function postToFbAndScrapeProductInfo(shopeeLink) {
 
     } catch (error) {
         console.log(`❌ Post to FB failed: ${error.message}`);
+        if (error.response) {
+            console.log(`   FB error code: ${error.response.status}`);
+            console.log(`   FB error detail:`, JSON.stringify(error.response.data, null, 2));
+        }
         return {
             productInfo: null,
             postId: null
