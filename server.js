@@ -8,9 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 const ALLOWED_ORIGINS = [
-    'https://loilh.github.io',
-    'http://localhost:3000',
-    'http://localhost:5000'
+    'https://loilh.github.io'
 ];
 
 const FACEBOOK_PAGE_ID = process.env.FACEBOOK_PAGE_ID || '';
