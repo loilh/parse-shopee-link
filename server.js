@@ -185,66 +185,84 @@ app.get('/api/resolve-link', verifyOrigin, async (req, res) => {
 // ==================== HELPER FUNCTIONS ====================
 
 /**
- * Lấy thông tin sản phẩm từ Shopee API
+ * Lấy thông tin sản phẩm từ Shopee bằng scraping HTML
  */
 async function fetchProductInfo(shopId, itemId) {
     try {
-        const url = `https://shopee.vn/api/v4/pdp/get_pc?shop_id=${shopId}&item_id=${itemId}`;
-        console.log(`🔗 Calling Shopee API: ${url}`);
+        // Construct product URL
+        const productUrl = `https://shopee.vn/api/v4/pdp/get_pc?shop_id=${shopId}&item_id=${itemId}`;
+        console.log(`🔗 Fetching product from: https://shopee.vn/-i.${shopId}.${itemId}`);
 
-        const response = await axios.get(url, {
+        // Tạo URL page view
+        const pageUrl = `https://shopee.vn/-i.${shopId}.${itemId}`;
+
+        const response = await axios.get(pageUrl, {
             timeout: 10000,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Referer': 'https://shopee.vn/',
-                'Accept': 'application/json',
-                'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8',
-                'DNT': '1',
-                'Sec-Fetch-Dest': 'empty',
-                'Sec-Fetch-Mode': 'cors',
-                'Sec-Fetch-Site': 'same-origin',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'vi-VN,vi;q=0.9',
                 'Cache-Control': 'no-cache',
                 'Pragma': 'no-cache'
             }
         });
 
-        console.log(`📦 Response status: ${response.status}`);
+        // Extract JSON data từ HTML
+        // Shopee inject dữ liệu vào <script> tag
+        const htmlContent = response.data;
 
-        // Check xem API response có data không
-        if (!response.data) {
-            console.log('⚠️ Response data is empty');
-            return null;
+        // Tìm data trong script tag
+        const jsonMatch = htmlContent.match(/window\.__INITIAL_STATE__\s*=\s*({.*?});/s);
+
+        if (jsonMatch) {
+            try {
+                const jsonStr = jsonMatch[1];
+                // Cố gắng parse JSON
+                const startIdx = jsonStr.indexOf('{');
+                const data = JSON.parse(jsonStr);
+
+                // Extract product info từ nested data
+                const productInfo = extractProductFromData(data);
+                if (productInfo) {
+                    console.log(`✅ Product info scraped: ${productInfo.name}`);
+                    console.log(`   - Price: ${productInfo.price}`);
+                    console.log(`   - Rating: ${productInfo.rating}/5`);
+                    console.log(`   - Sales: ${productInfo.sales}`);
+                    return productInfo;
+                }
+            } catch (e) {
+                console.log('⚠️ JSON parse failed:', e.message);
+            }
         }
 
-        if (response.data?.data?.item) {
-            const product = response.data.data.item;
+        // Fallback: Extract từ HTML meta tags
+        console.log('🔄 Trying meta tags extraction...');
+
+        // OG tags thường có title và image
+        const titleMatch = htmlContent.match(/<meta\s+property="og:title"\s+content="([^"]*)"/);
+        const imageMatch = htmlContent.match(/<meta\s+property="og:image"\s+content="([^"]*)"/);
+        const descMatch = htmlContent.match(/<meta\s+name="description"\s+content="([^"]*)"/);
+
+        if (titleMatch) {
             const productInfo = {
-                name: product.name || 'Sản phẩm',
-                image: product.image || '',
-                sales: product.historical_sold || product.sold || 0,
-                rating: (product.rating_star || 0) / 2, // Convert từ 0-10 sang 0-5
-                price: (product.price || 0) / 100000
+                name: titleMatch[1] || 'Sản phẩm',
+                image: imageMatch ? imageMatch[1] : '',
+                sales: 0,
+                rating: 0,
+                price: 0
             };
-            console.log(`✅ Product info fetched: ${product.name}`);
-            console.log(`   - Price: ${productInfo.price}`);
-            console.log(`   - Rating: ${productInfo.rating}/5`);
-            console.log(`   - Sales: ${productInfo.sales}`);
+            console.log(`✅ Meta tags extracted: ${productInfo.name}`);
             return productInfo;
-        } else {
-            console.log('⚠️ API response không có item data');
-            console.log('Response data:', JSON.stringify(response.data).substring(0, 200));
-            return null;
         }
+
+        console.log('⚠️ Không thể lấy thông tin sản phẩm');
+        return null;
 
     } catch (error) {
         if (error.response) {
-            console.log(`❌ API Error ${error.response.status}:`, error.response.data?.message || error.message);
-
-            // Thử fallback API khác
-            console.log('🔄 Trying fallback API...');
-            return await fetchProductInfoFallback(shopId, itemId);
+            console.log(`❌ Error ${error.response.status}:`, error.message);
         } else if (error.request) {
-            console.log('❌ No response from API:', error.message);
+            console.log('❌ No response:', error.message);
         } else {
             console.log('❌ Error:', error.message);
         }
@@ -253,38 +271,76 @@ async function fetchProductInfo(shopId, itemId) {
 }
 
 /**
- * Fallback API để lấy thông tin sản phẩm
+ * Extract product info từ __INITIAL_STATE__ data
  */
-async function fetchProductInfoFallback(shopId, itemId) {
+function extractProductFromData(data) {
     try {
-        // Thử dùng API endpoint khác
-        const url = `https://shopee.vn/api/v2/item/get?itemid=${itemId}&shopid=${shopId}`;
-        console.log(`🔗 Trying fallback API: ${url}`);
+        // Tìm item info trong data structure
+        // Shopee stores product info ở nhiều level khác nhau
 
-        const response = await axios.get(url, {
-            timeout: 10000,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Referer': `https://shopee.vn/${shopId}.${itemId}`,
-                'Accept': 'application/json'
-            }
-        });
+        // Cách 1: Tìm itemDetail
+        if (data?.itemDetail?.item) {
+            const item = data.itemDetail.item;
+            return {
+                name: item.name || 'Sản phẩm',
+                image: item.image || '',
+                sales: item.sold || item.historical_sold || 0,
+                rating: (item.rating || 0) / 2,
+                price: (item.price || 0) / 100000
+            };
+        }
 
-        if (response.data?.item) {
-            const product = response.data.item;
-            const productInfo = {
+        // Cách 2: Tìm product info
+        if (data?.product) {
+            const product = data.product;
+            return {
                 name: product.name || 'Sản phẩm',
                 image: product.image || '',
                 sales: product.sold || 0,
-                rating: (product.rating_star || 0) / 2,
+                rating: (product.rating || 0) / 2,
                 price: (product.price || 0) / 100000
             };
-            console.log(`✅ Fallback API success: ${product.name}`);
-            return productInfo;
         }
-    } catch (error) {
-        console.log('⚠️ Fallback API also failed:', error.message);
+
+        // Cách 3: Recursive search
+        const result = recursiveSearch(data, 'item');
+        if (result) {
+            return {
+                name: result.name || 'Sản phẩm',
+                image: result.image || '',
+                sales: result.sold || result.historical_sold || 0,
+                rating: (result.rating || result.rating_star || 0) / 2,
+                price: (result.price || 0) / 100000
+            };
+        }
+
+    } catch (e) {
+        console.log('⚠️ Data extraction failed:', e.message);
     }
+    return null;
+}
+
+/**
+ * Recursive search để tìm object có properties cần
+ */
+function recursiveSearch(obj, key, depth = 0) {
+    if (depth > 5) return null; // Limit depth
+
+    if (!obj || typeof obj !== 'object') return null;
+
+    // Check current object
+    if (obj[key] && obj[key].name && obj[key].price) {
+        return obj[key];
+    }
+
+    // Search nested
+    for (let k in obj) {
+        if (obj.hasOwnProperty(k)) {
+            const result = recursiveSearch(obj[k], key, depth + 1);
+            if (result) return result;
+        }
+    }
+
     return null;
 }
 
