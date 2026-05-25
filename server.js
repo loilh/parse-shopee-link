@@ -3,7 +3,7 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const cheerio = require('cheerio');
-const puppeteer = require('puppeteer');
+const { chromium } = require('playwright');
 require('dotenv').config();
 
 const app = express();
@@ -187,54 +187,50 @@ app.get('/api/resolve-link', verifyOrigin, async (req, res) => {
 // ==================== HELPER FUNCTIONS ====================
 
 /**
- * Lấy HTML bằng Puppeteer (headless browser)
+ * Lấy HTML bằng Playwright (headless browser)
  */
-async function fetchWithPuppeteer(pageUrl) {
+async function fetchWithPlaywright(pageUrl) {
     let browser;
     try {
-        console.log(`🤖 Launching Puppeteer for: ${pageUrl}`);
+        console.log(`🎭 Launching Playwright for: ${pageUrl}`);
 
-        browser = await puppeteer.launch({
-            headless: 'new',
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu'
-            ]
+        browser = await chromium.launch({
+            headless: true,
+            args: ['--no-sandbox']
         });
 
-        const page = await browser.newPage();
+        const context = await browser.createBrowserContext({
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        });
+
+        const page = await context.newPage();
 
         // Set viewport
-        await page.setViewport({ width: 1920, height: 1080 });
-
-        // Set user agent
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        await page.setViewportSize({ width: 1920, height: 1080 });
 
         // Set headers
         await page.setExtraHTTPHeaders({
             'Accept-Language': 'vi-VN,vi;q=0.9',
-            'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache'
+            'Cache-Control': 'no-cache'
         });
 
-        // Wait for page load
+        // Navigate
         console.log('⏳ Navigating to page...');
         await page.goto(pageUrl, {
-            waitUntil: 'networkidle2',
+            waitUntil: 'domcontentloaded',
             timeout: 15000
         });
 
-        // Wait for content to load
+        // Wait for content
         console.log('⏳ Waiting for content...');
         await page.waitForTimeout(2000);
 
         // Get HTML
         const html = await page.content();
 
-        console.log(`✅ Got HTML from Puppeteer (${html.length} bytes)`);
+        console.log(`✅ Got HTML from Playwright (${html.length} bytes)`);
 
+        await context.close();
         await browser.close();
         return html;
 
@@ -244,7 +240,7 @@ async function fetchWithPuppeteer(pageUrl) {
                 await browser.close();
             } catch (e) { }
         }
-        console.log(`❌ Puppeteer error: ${error.message}`);
+        console.log(`❌ Playwright error: ${error.message}`);
         return null;
     }
 }
@@ -293,11 +289,11 @@ async function fetchProductInfo(shopId, itemId) {
             }
         }
 
-        // Nếu axios fail, thử Puppeteer
+        // Nếu axios fail, thử Playwright
         if (!html) {
-            console.log('🔄 Axios failed for all URLs, trying Puppeteer...');
+            console.log('🔄 Axios failed for all URLs, trying Playwright...');
             for (let pageUrl of urlFormats) {
-                html = await fetchWithPuppeteer(pageUrl);
+                html = await fetchWithPlaywright(pageUrl);
                 if (html && html.length > 1000) {
                     workingUrl = pageUrl;
                     break;
