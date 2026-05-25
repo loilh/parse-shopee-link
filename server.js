@@ -136,15 +136,19 @@ app.get('/api/resolve-link', async (req, res) => {
 
         console.log(`📝 IDs: shop=${shopId}, item=${itemId}`);
 
+        // URL sạch: bỏ query params (?__mobile__=1&credential_token=...) vì làm FB OG fail
+        const cleanUrl = resolvedUrl.split('?')[0];
+        console.log(`🔗 Clean URL: ${cleanUrl}`);
+
         // Lấy thông tin sản phẩm từ Facebook OG cache (Shopee API bị block)
         const productInfo = FACEBOOK_APP_TOKEN
-            ? await getProductInfoFromFacebookOG(resolvedUrl)
+            ? await getProductInfoFromFacebookOG(cleanUrl)
             : null;
 
         // Comment lên Facebook (nếu có token)
         let facebookPostId = null;
         if (FACEBOOK_APP_TOKEN) {
-            facebookPostId = await commentToFacebook(resolvedUrl, productInfo);
+            facebookPostId = await commentToFacebook(cleanUrl, productInfo);
         } else {
             console.log('⚠️ FACEBOOK_APP_TOKEN not set');
         }
