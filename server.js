@@ -1,7 +1,6 @@
-// server.js - Resolve → Comment FB (1 post/ngày) → Lấy OG từ Facebook
+// server.js - Resolve short URL → Comment FB (1 post/ngày) → Lấy OG từ short URL
 const express = require('express');
 const axios = require('axios');
-const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
@@ -17,312 +16,264 @@ const ALLOWED_ORIGINS = [
 const FACEBOOK_PAGE_ID = process.env.FACEBOOK_PAGE_ID || '';
 const FACEBOOK_APP_TOKEN = process.env.FACEBOOK_APP_TOKEN || '';
 
-// Cache sản phẩm (1 giờ)
+// Cache (1 giờ)
 const linkCache = new Map();
 const CACHE_TIME = 1000 * 60 * 60;
 
-// "Post ngày hôm nay" - chỉ tạo 1 post/ngày, link mới thì comment vào
-let dailyPost = {
-    id: null,
-    date: null  // format: 'YYYY-MM-DD'
-};
+// 1 post mỗi ngày trên Page
+let dailyPost = { id: null, date: null };
 
 // ==================== MIDDLEWARE ====================
 
 app.use((req, res, next) => {
     const origin = req.get('origin');
-
-    if (!origin) {
-        return res.status(403).json({ error: 'Origin header required' });
-    }
+    if (!origin) return res.status(403).json({ error: 'Origin header required' });
 
     if (ALLOWED_ORIGINS.includes(origin)) {
-        console.log(`✅ Request verified from: ${origin}`);
         res.header('Access-Control-Allow-Origin', origin);
         res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
         res.header('Access-Control-Allow-Headers', 'Content-Type');
         next();
     } else {
-        console.log(`❌ Request denied from: ${origin}`);
+        console.log(`❌ Denied: ${origin}`);
         return res.status(403).json({ error: 'Origin not allowed' });
     }
 });
 
 app.use(express.json());
 
-// ==================== API ROUTES ====================
+// ==================== ROUTES ====================
 
 app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-/**
- * Main endpoint: Resolve → Comment FB → Get OG data từ Facebook
- */
 app.get('/api/resolve-link', async (req, res) => {
     try {
         const { url } = req.query;
+        if (!url) return res.status(400).json({ error: 'URL parameter required' });
 
-        if (!url) {
-            return res.status(400).json({ error: 'URL parameter required' });
-        }
+        console.log(`\n🔄 ${url}`);
 
-        console.log(`\n🔄 Resolve link: ${url}`);
-
-        // Check cache
+        // Cache
         if (linkCache.has(url)) {
             const cached = linkCache.get(url);
             if (Date.now() - cached.timestamp < CACHE_TIME) {
-                console.log('✅ From cache');
+                console.log('✅ Cache hit');
                 return res.json({ ...cached.data, cached: true });
-            } else {
-                linkCache.delete(url);
             }
+            linkCache.delete(url);
         }
 
-        // Resolve short URL
+        // Resolve short URL → lấy resolvedUrl
         let resolvedUrl = url;
         const originLinkMatch = url.match(/origin_link=([^&]+)/);
 
         if (originLinkMatch) {
             try {
                 resolvedUrl = decodeURIComponent(originLinkMatch[1]);
-                console.log(`✅ Extracted origin_link`);
-            } catch (e) {
-                console.log('⚠️ Could not decode origin_link');
-            }
+            } catch (_) {}
         } else {
-            console.log('🔗 Resolving short URL...');
             try {
-                const response = await axios.get(url, {
+                const r = await axios.get(url, {
                     maxRedirects: 5,
                     timeout: 8000,
-                    headers: {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                    }
+                    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
                 });
-                resolvedUrl = response.request.res.responseUrl || response.config.url;
-            } catch (error) {
-                if (error.response?.status === 301 || error.response?.status === 302) {
-                    resolvedUrl = error.response.headers.location || url;
+                resolvedUrl = r.request.res.responseUrl || r.config.url;
+            } catch (e) {
+                if (e.response?.status === 301 || e.response?.status === 302) {
+                    resolvedUrl = e.response.headers.location || url;
                 }
             }
-            console.log(`✅ Resolved: ${resolvedUrl.substring(0, 80)}...`);
         }
+
+        // URL sạch (bỏ query params) dùng để hiển thị
+        const cleanUrl = resolvedUrl.split('?')[0];
+        console.log(`✅ Resolved: ${cleanUrl}`);
 
         // Extract shopId & itemId
         let shopId, itemId;
-        const match1 = resolvedUrl.match(/\/([^\/]+)\/(\d+)\/(\d+)/);
-        if (match1) {
-            shopId = match1[2];
-            itemId = match1[3];
-        } else {
-            const match2 = resolvedUrl.match(/-i\.(\d+)\.(\d+)/);
-            if (match2) {
-                shopId = match2[1];
-                itemId = match2[2];
-            }
+        const m1 = resolvedUrl.match(/\/([^\/]+)\/(\d+)\/(\d+)/);
+        if (m1) { shopId = m1[2]; itemId = m1[3]; }
+        else {
+            const m2 = resolvedUrl.match(/-i\.(\d+)\.(\d+)/);
+            if (m2) { shopId = m2[1]; itemId = m2[2]; }
         }
 
         if (!shopId || !itemId) {
-            console.log(`❌ Cannot extract IDs`);
-            return res.json({
-                originalUrl: url,
-                resolvedUrl: resolvedUrl,
-                productInfo: null,
-                cached: false
-            });
+            return res.json({ originalUrl: url, resolvedUrl: cleanUrl, productInfo: null, cached: false });
         }
 
-        console.log(`📝 IDs: shop=${shopId}, item=${itemId}`);
+        console.log(`📝 shop=${shopId}, item=${itemId}`);
 
-        // URL sạch: bỏ query params (?__mobile__=1&credential_token=...) vì làm FB OG fail
-        const cleanUrl = resolvedUrl.split('?')[0];
-        console.log(`🔗 Clean URL: ${cleanUrl}`);
+        // Lấy OG data từ Facebook (dùng short URL gốc — FB tự crawl, như khi share qua Mess)
+        let productInfo = null;
+        if (FACEBOOK_APP_TOKEN) {
+            productInfo = await getOgFromFacebook(url);  // url = short URL gốc (s.shopee.vn/...)
+        }
 
-        // Lấy thông tin sản phẩm từ Facebook OG cache (Shopee API bị block)
-        const productInfo = FACEBOOK_APP_TOKEN
-            ? await getProductInfoFromFacebookOG(cleanUrl)
-            : null;
-
-        // Comment lên Facebook (nếu có token)
+        // Comment lên Facebook page (1 post/ngày)
         let facebookPostId = null;
         if (FACEBOOK_APP_TOKEN) {
             facebookPostId = await commentToFacebook(cleanUrl, productInfo);
-        } else {
-            console.log('⚠️ FACEBOOK_APP_TOKEN not set');
         }
 
-        const response = {
-            originalUrl: url,
-            resolvedUrl: resolvedUrl,
-            productInfo: productInfo,
-            facebookPostId: facebookPostId,
-            cached: false
-        };
+        const result = { originalUrl: url, resolvedUrl: cleanUrl, productInfo, facebookPostId, cached: false };
+        linkCache.set(url, { data: result, timestamp: Date.now() });
 
-        // Cache
-        linkCache.set(url, { data: response, timestamp: Date.now() });
-
-        console.log('✨ Response sent');
-        res.json(response);
+        console.log('✨ Done');
+        res.json(result);
 
     } catch (error) {
-        console.error('❌ Error:', error.message);
+        console.error('❌', error.message);
         res.status(500).json({ error: error.message });
     }
 });
 
-// ==================== FACEBOOK LOGIC ====================
+// ==================== FACEBOOK ====================
 
 /**
- * Lấy hoặc tạo "post hôm nay" trên Page
- * - Mỗi ngày chỉ tạo 1 post mới
- * - Link mới → comment vào post đó
+ * Lấy OG data từ Facebook bằng cách truyền SHORT URL gốc
+ * Facebook tự follow redirect → crawl Shopee → trả về product info
+ * (Giống như khi share link qua Messenger)
  */
-async function getOrCreateDailyPost() {
-    const today = new Date().toISOString().split('T')[0]; // 'YYYY-MM-DD'
-
-    if (dailyPost.id && dailyPost.date === today) {
-        console.log(`📌 Dùng post hôm nay: ${dailyPost.id}`);
-        return dailyPost.id;
-    }
-
-    // Tạo post mới cho ngày hôm nay
-    console.log(`📝 Tạo post mới cho ngày ${today}...`);
-    const fbRes = await axios.post(
-        `https://graph.facebook.com/v22.0/${FACEBOOK_PAGE_ID}/feed`,
-        {
-            message: `🛍️ Tổng hợp sản phẩm Shopee ngày ${today}\n\nCác sản phẩm hay hôm nay 👇`,
-            access_token: FACEBOOK_APP_TOKEN
-        }
-    );
-
-    dailyPost = { id: fbRes.data.id, date: today };
-    console.log(`✅ Tạo post mới: ${dailyPost.id}`);
-    return dailyPost.id;
-}
-
-/**
- * Lấy thông tin sản phẩm từ Facebook OG cache
- * Facebook crawl Shopee (kể cả SPA) và lưu OG data → ta đọc lại từ FB
- *
- * Flow:
- *   1. POST scrape=true  → force FB crawl URL (nếu chưa có cache)
- *   2. GET og_object     → đọc name, image, description mà FB đã crawl
- */
-async function getProductInfoFromFacebookOG(shopeeLink) {
+async function getOgFromFacebook(shortUrl) {
     try {
-        // Bước 1: POST với form-data (không phải query string!)
-        console.log('🕷️  FB OG scrape...');
-        const formData = new URLSearchParams();
-        formData.append('id', shopeeLink);
-        formData.append('scrape', 'true');
-        formData.append('access_token', FACEBOOK_APP_TOKEN);
+        console.log('🕷️  FB OG scrape (short URL)...');
 
-        await axios.post(
+        // Trigger scrape với short URL — FB sẽ follow redirect như bình thường
+        const formData = new URLSearchParams({
+            id: shortUrl,
+            scrape: 'true',
+            access_token: FACEBOOK_APP_TOKEN
+        });
+
+        const scrapeRes = await axios.post(
             'https://graph.facebook.com/v22.0/',
             formData.toString(),
             { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
         );
 
-        // Bước 2: GET og_object
-        const ogRes = await axios.get('https://graph.facebook.com/v22.0/', {
-            params: {
-                id: shopeeLink,
-                fields: 'og_object{title,description,image}',
-                access_token: FACEBOOK_APP_TOKEN
-            }
-        });
+        // Đọc OG data FB vừa crawl
+        const og = scrapeRes.data?.og_object || scrapeRes.data;
 
-        const og = ogRes.data?.og_object;
-        if (!og?.title) {
-            console.log('⚠️ FB OG: không có title');
+        // Thử đọc trực tiếp từ scrape response trước
+        let title = og?.title || og?.name;
+        let description = og?.description || '';
+        let imageUrl = '';
+
+        if (!title) {
+            // Nếu không có trong scrape response, GET lại
+            const getRes = await axios.get('https://graph.facebook.com/v22.0/', {
+                params: {
+                    id: shortUrl,
+                    fields: 'og_object{title,description,image}',
+                    access_token: FACEBOOK_APP_TOKEN
+                }
+            });
+            const ogObj = getRes.data?.og_object;
+            title = ogObj?.title;
+            description = ogObj?.description || '';
+            const img = ogObj?.image;
+            imageUrl = Array.isArray(img) ? (img[0]?.url || '') : (img?.url || '');
+        } else {
+            const img = og?.image;
+            imageUrl = Array.isArray(img) ? (img[0]?.url || '') : (img?.url || '');
+        }
+
+        if (!title || title.toLowerCase().includes('shopee việt nam')) {
+            console.log('⚠️ FB OG: chỉ lấy được homepage title, bỏ qua');
             return null;
         }
 
-        const desc = og.description || '';
+        // Parse price/rating/sales từ description
         let price = 0, rating = 0, sales = 0;
-
-        const priceMatch = desc.match(/₫\s*([0-9,.]+)/);
+        const priceMatch = description.match(/₫\s*([0-9,.]+)/);
         if (priceMatch) price = parseFloat(priceMatch[1].replace(/[,.]/g, '')) / 100000;
 
-        const ratingMatch = desc.match(/(\d+(?:\.\d+)?)\s*\/\s*5/);
+        const ratingMatch = description.match(/(\d+(?:\.\d+)?)\s*\/\s*5/);
         if (ratingMatch) rating = parseFloat(ratingMatch[1]);
 
-        const salesMatch = desc.match(/(\d+(?:\.\d+)?k?)\s*(?:đã bán|sold)/i);
-        if (salesMatch) {
-            sales = parseFloat(salesMatch[1]) * (salesMatch[1].endsWith('k') ? 1000 : 1);
-        }
-
-        // Lấy image URL từ array hoặc object
-        const imageUrl = Array.isArray(og.image)
-            ? (og.image[0]?.url || '')
-            : (og.image?.url || '');
+        const salesMatch = description.match(/(\d+(?:\.\d+)?k?)\s*(?:đã bán|sold)/i);
+        if (salesMatch) sales = parseFloat(salesMatch[1]) * (salesMatch[1].endsWith('k') ? 1000 : 1);
 
         const productInfo = {
-            name: og.title.replace(/\s*\|\s*Shopee.*$/i, '').trim().substring(0, 200),
+            name: title.replace(/\s*\|\s*Shopee.*$/i, '').trim().substring(0, 200),
             image: imageUrl.startsWith('http') ? imageUrl : '',
             price,
             rating,
             sales
         };
 
-        console.log(`✅ FB OG: ${productInfo.name.substring(0, 60)}`);
-        if (productInfo.price > 0)  console.log(`   Price:  ${productInfo.price}k`);
-        if (productInfo.rating > 0) console.log(`   Rating: ${productInfo.rating}/5`);
-        if (productInfo.sales > 0)  console.log(`   Sales:  ${productInfo.sales}`);
-
+        console.log(`✅ OG: ${productInfo.name.substring(0, 60)}`);
+        if (price > 0)  console.log(`   💰 ${price}k`);
+        if (rating > 0) console.log(`   ⭐ ${rating}/5`);
         return productInfo;
 
     } catch (e) {
         console.log(`⚠️ FB OG lỗi: ${e.message}`);
-        if (e.response) console.log('   Detail:', JSON.stringify(e.response.data));
+        if (e.response) console.log('   ', JSON.stringify(e.response.data));
         return null;
     }
 }
 
 /**
- * Comment link vào post ngày hôm nay trên Facebook
- * Token cần có: pages_manage_posts + pages_manage_engagement
+ * Tạo post mới mỗi ngày, link mới → comment vào post đó
  */
+async function getOrCreateDailyPost() {
+    const today = new Date().toISOString().split('T')[0];
+
+    if (dailyPost.id && dailyPost.date === today) {
+        console.log(`📌 Post hôm nay: ${dailyPost.id}`);
+        return dailyPost.id;
+    }
+
+    console.log(`📝 Tạo post mới ngày ${today}...`);
+    const r = await axios.post(
+        `https://graph.facebook.com/v22.0/${FACEBOOK_PAGE_ID}/feed`,
+        {
+            message: `🛍️ Shopee hay ngày ${today}\n\nCác link sản phẩm bên dưới 👇`,
+            access_token: FACEBOOK_APP_TOKEN
+        }
+    );
+
+    dailyPost = { id: r.data.id, date: today };
+    console.log(`✅ Post: ${dailyPost.id}`);
+    return dailyPost.id;
+}
+
 async function commentToFacebook(shopeeLink, productInfo) {
     try {
         const postId = await getOrCreateDailyPost();
 
-        const commentText = productInfo
-            ? `${productInfo.name.substring(0, 80)}\n💰 ${productInfo.price}k${productInfo.rating > 0 ? `  ⭐ ${productInfo.rating}/5` : ''}\n${shopeeLink}`
+        const text = productInfo?.name
+            ? `${productInfo.name.substring(0, 80)}${productInfo.price > 0 ? `\n💰 ${productInfo.price}k` : ''}${productInfo.rating > 0 ? `  ⭐ ${productInfo.rating}/5` : ''}\n${shopeeLink}`
             : shopeeLink;
 
         await axios.post(
             `https://graph.facebook.com/v22.0/${postId}/comments`,
-            {
-                message: commentText,
-                access_token: FACEBOOK_APP_TOKEN
-            }
+            { message: text, access_token: FACEBOOK_APP_TOKEN }
         );
-        console.log(`✅ Đã comment vào post ${postId}`);
+        console.log(`💬 Comment → post ${postId}`);
         return postId;
 
-    } catch (error) {
-        console.log(`❌ FB comment failed: ${error.message}`);
-        if (error.response) {
-            console.log(`   Detail:`, JSON.stringify(error.response.data, null, 2));
-        }
+    } catch (e) {
+        console.log(`⚠️ Comment lỗi: ${e.message}`);
+        if (e.response) console.log('   ', JSON.stringify(e.response.data));
         return null;
     }
 }
 
-// ==================== SERVER ====================
+// ==================== START ====================
 
 app.listen(PORT, () => {
     console.log(`
-╔════════════════════════════════════════════════════════════╗
-║   Shopee Affiliate Backend                                 ║
-║   Port: ${PORT}                                              ║
-║   Strategy: 1 post/ngày + comment link + OG từ Facebook   ║
-║   GET /api/health                                          ║
-║   GET /api/resolve-link?url=...                            ║
-╚════════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════╗
+║  Shopee Affiliate Backend                    ║
+║  Port: ${PORT}                                 ║
+║  GET /api/health                             ║
+║  GET /api/resolve-link?url=...               ║
+╚══════════════════════════════════════════════╝
     `);
 });
