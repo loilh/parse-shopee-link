@@ -3,6 +3,7 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const cheerio = require('cheerio');
+const puppeteer = require('puppeteer');
 require('dotenv').config();
 
 const app = express();
@@ -186,7 +187,70 @@ app.get('/api/resolve-link', verifyOrigin, async (req, res) => {
 // ==================== HELPER FUNCTIONS ====================
 
 /**
- * Lấy thông tin sản phẩm từ Shopee bằng scraping HTML với cheerio
+ * Lấy HTML bằng Puppeteer (headless browser)
+ */
+async function fetchWithPuppeteer(pageUrl) {
+    let browser;
+    try {
+        console.log(`🤖 Launching Puppeteer for: ${pageUrl}`);
+
+        browser = await puppeteer.launch({
+            headless: 'new',
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu'
+            ]
+        });
+
+        const page = await browser.newPage();
+
+        // Set viewport
+        await page.setViewport({ width: 1920, height: 1080 });
+
+        // Set user agent
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
+        // Set headers
+        await page.setExtraHTTPHeaders({
+            'Accept-Language': 'vi-VN,vi;q=0.9',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
+        });
+
+        // Wait for page load
+        console.log('⏳ Navigating to page...');
+        await page.goto(pageUrl, {
+            waitUntil: 'networkidle2',
+            timeout: 15000
+        });
+
+        // Wait for content to load
+        console.log('⏳ Waiting for content...');
+        await page.waitForTimeout(2000);
+
+        // Get HTML
+        const html = await page.content();
+
+        console.log(`✅ Got HTML from Puppeteer (${html.length} bytes)`);
+
+        await browser.close();
+        return html;
+
+    } catch (error) {
+        if (browser) {
+            try {
+                await browser.close();
+            } catch (e) { }
+        }
+        console.log(`❌ Puppeteer error: ${error.message}`);
+        return null;
+    }
+}
+
+/**
+ * Lấy thông tin sản phẩm từ Shopee bằng scraping HTML với cheerio hoặc Puppeteer
  */
 async function fetchProductInfo(shopId, itemId) {
     try {
@@ -225,13 +289,24 @@ async function fetchProductInfo(shopId, itemId) {
                     break;
                 }
             } catch (error) {
-                console.log(`⚠️ Failed: ${error.response?.status || error.message}`);
-                continue;
+                console.log(`⚠️ Axios failed: ${error.response?.status || error.message}`);
+            }
+        }
+
+        // Nếu axios fail, thử Puppeteer
+        if (!html) {
+            console.log('🔄 Axios failed for all URLs, trying Puppeteer...');
+            for (let pageUrl of urlFormats) {
+                html = await fetchWithPuppeteer(pageUrl);
+                if (html && html.length > 1000) {
+                    workingUrl = pageUrl;
+                    break;
+                }
             }
         }
 
         if (!html) {
-            console.log('❌ Không thể lấy HTML từ bất kỳ URL nào');
+            console.log('❌ Không thể lấy HTML từ bất kỳ method nào');
             return null;
         }
 
