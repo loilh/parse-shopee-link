@@ -142,21 +142,22 @@ async function getProductInfoViaFbPost(shortUrl) {
     try {
         console.log('🕷️  Post tạm lên FB để lấy link preview...');
 
-        // Post PRIVATE (chỉ mình xem) với `link` param để FB crawl đúng
+        // Post public với `link` param → FB crawl đúng (draft không trigger crawl)
         const postRes = await axios.post(
             `https://graph.facebook.com/v22.0/${FACEBOOK_PAGE_ID}/feed`,
             {
-                message: '.',
+                message: '🔍',
                 link: shortUrl,
-                published: false,          // không publish ra ngoài
                 access_token: FACEBOOK_APP_TOKEN
             }
         );
         tempPostId = postRes.data.id;
         console.log(`   Post tạm: ${tempPostId}`);
 
-        // Đọc lại link preview FB vừa crawl
-        // (v3.3+ dùng `attachments` thay vì name/description/picture đã deprecated)
+        // Chờ FB crawl xong (async)
+        await new Promise(r => setTimeout(r, 3000));
+
+        // Đọc lại link preview
         const readRes = await axios.get(
             `https://graph.facebook.com/v22.0/${tempPostId}`,
             {
@@ -167,7 +168,10 @@ async function getProductInfoViaFbPost(shortUrl) {
             }
         );
 
-        const attachment = readRes.data?.attachments?.data?.[0] || {};
+        const rawAttachment = readRes.data?.attachments?.data?.[0] || {};
+        console.log(`   Attachment raw:`, JSON.stringify(rawAttachment).substring(0, 300));
+
+        const attachment = rawAttachment;
         const title = attachment.title || '';
         const description = attachment.description || '';
         const imageUrl = attachment.media?.image?.src || '';
