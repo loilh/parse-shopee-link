@@ -2,6 +2,7 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
+const cheerio = require('cheerio');
 require('dotenv').config();
 
 const app = express();
@@ -153,53 +154,85 @@ app.get('/api/resolve-link', async (req, res) => {
 });
 
 /**
- * Lấy thông tin sản phẩm từ Shopee API
+ * Lấy thông tin sản phẩm từ HTML meta tags
  */
 async function fetchProductInfo(shopId, itemId) {
     try {
         console.log(`📝 Fetching product info: shop=${shopId}, item=${itemId}`);
 
-        // Shopee API endpoint
-        const apiUrl = `https://shopee.vn/api/v2/item/get?itemid=${itemId}&shopid=${shopId}`;
+        // Construct direct product URL
+        const productUrl = `https://shopee.vn/product/${shopId}/${itemId}`;
 
-        console.log(`🔗 Trying Shopee API: ${apiUrl}`);
+        console.log(`🔗 Fetching HTML from: ${productUrl}`);
 
-        const response = await axios.get(apiUrl, {
-            timeout: 8000,
+        const response = await axios.get(productUrl, {
+            timeout: 10000,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'application/json',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'vi-VN,vi;q=0.9',
-                'Referer': `https://shopee.vn/-i.${shopId}.${itemId}`
+                'Referer': 'https://shopee.vn/',
+                'Cache-Control': 'no-cache'
             }
         });
 
-        if (response.data && response.data.data) {
-            const item = response.data.data;
+        const html = response.data;
+        console.log(`✅ Got HTML (${html.length} bytes)`);
 
-            console.log(`✅ Product info from API: ${item.name}`);
+        // Parse with cheerio
+        const $ = cheerio.load(html);
 
-            return {
-                name: item.name || 'Sản phẩm',
-                image: item.image ? `https://cf.shopee.vn/file/${item.image}` : '',
-                price: item.price ? item.price / 100000 : 0,
-                rating: item.rating ? item.rating / 20 : 0,
-                sales: item.sold || 0
-            };
+        // Extract from meta tags
+        const name = $('meta[property="og:title"]').attr('content') || $('title').text() || 'Sản phẩm';
+        const image = $('meta[property="og:image"]').attr('content') || '';
+        const description = $('meta[property="og:description"]').attr('content') || '';
+
+        // Parse price từ description hoặc tìm trong HTML
+        let price = 0;
+        let rating = 0;
+        let sales = 0;
+
+        // Try to find price pattern in description
+        const priceMatch = description.match(/₫\s*([\d.]+)/);
+        if (priceMatch) {
+            price = parseFloat(priceMatch[1].replace(/\./g, '')) / 100000;
         }
 
-        console.log('❌ No data in API response');
-        return null;
+        // Try to find rating pattern
+        const ratingMatch = description.match(/(\d+(?:\.\d+)?)\s*\/\s*5/);
+        if (ratingMatch) {
+            rating = parseFloat(ratingMatch[1]);
+        }
 
-    } catch (error) {
-        console.log(`❌ API Error: ${error.message}`);
+        // Try to find sales pattern
+        const salesMatch = description.match(/(\d+)k?\s*(?:sold|đã bán)/i);
+        if (salesMatch) {
+            sales = parseFloat(salesMatch[1]);
+        }
 
-        // Fallback: Return minimal info
-        if (error.response?.status === 404) {
-            console.log('⚠️ Product not found');
+        if (!name || name.length < 3) {
+            console.log('⚠️ Could not extract product name');
             return null;
         }
 
+        const result = {
+            name: name.replace(/\s*\|\s*Shopee/i, '').trim(),
+            image: image,
+            price: price,
+            rating: rating,
+            sales: sales
+        };
+
+        console.log(`✅ Product info extracted:`);
+        console.log(`   Name: ${result.name.substring(0, 60)}`);
+        if (result.price > 0) console.log(`   Price: ${result.price}`);
+        if (result.rating > 0) console.log(`   Rating: ${result.rating}/5`);
+        if (result.sales > 0) console.log(`   Sales: ${result.sales}`);
+
+        return result;
+
+    } catch (error) {
+        console.log(`❌ Error fetching product info: ${error.message}`);
         return null;
     }
 }
