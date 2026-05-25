@@ -263,46 +263,21 @@ async function fetchProductInfo(shopId, itemId) {
         let html = null;
         let workingUrl = null;
 
-        // Thử từng URL cho đến khi thành công
+        // ⭐ Skip Axios hoàn toàn (HTML từ Axios là redirect rỗng)
+        // Dùng Playwright để render JavaScript và bypass Shopee verification
+        console.log('🎭 Using Playwright to bypass Shopee verification...');
+
         for (let pageUrl of urlFormats) {
-            try {
-                console.log(`🔗 Trying: ${pageUrl}`);
-                const response = await axios.get(pageUrl, {
-                    timeout: 8000,
-                    headers: {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                        'Accept-Language': 'vi-VN,vi;q=0.9',
-                        'Cache-Control': 'no-cache',
-                        'Cookie': 'SPC_F=; SPC_T=;'
-                    }
-                });
-
-                if (response.status === 200 && response.data.length > 1000) {
-                    html = response.data;
-                    workingUrl = pageUrl;
-                    console.log(`✅ Got response from: ${pageUrl} (${response.data.length} bytes)`);
-                    break;
-                }
-            } catch (error) {
-                console.log(`⚠️ Axios failed: ${error.response?.status || error.message}`);
+            html = await fetchWithPlaywright(pageUrl);
+            if (html && html.length > 5000) { // Require substantial HTML (not redirect)
+                workingUrl = pageUrl;
+                console.log(`✅ Got valid HTML from Playwright: ${pageUrl}`);
+                break;
             }
         }
 
-        // Nếu axios fail, thử Playwright
-        if (!html) {
-            console.log('🔄 Axios failed for all URLs, trying Playwright...');
-            for (let pageUrl of urlFormats) {
-                html = await fetchWithPlaywright(pageUrl);
-                if (html && html.length > 1000) {
-                    workingUrl = pageUrl;
-                    break;
-                }
-            }
-        }
-
-        if (!html) {
-            console.log('❌ Không thể lấy HTML từ bất kỳ method nào');
+        if (!html || html.length < 5000) {
+            console.log('❌ Playwright không thể lấy đủ HTML');
             return null;
         }
 
