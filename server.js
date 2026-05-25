@@ -195,8 +195,16 @@ async function fetchProductInfo(shopId, itemId) {
         const response = await axios.get(url, {
             timeout: 10000,
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Referer': 'https://shopee.vn/'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': 'https://shopee.vn/',
+                'Accept': 'application/json',
+                'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8',
+                'DNT': '1',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache'
             }
         });
 
@@ -231,6 +239,10 @@ async function fetchProductInfo(shopId, itemId) {
     } catch (error) {
         if (error.response) {
             console.log(`❌ API Error ${error.response.status}:`, error.response.data?.message || error.message);
+
+            // Thử fallback API khác
+            console.log('🔄 Trying fallback API...');
+            return await fetchProductInfoFallback(shopId, itemId);
         } else if (error.request) {
             console.log('❌ No response from API:', error.message);
         } else {
@@ -238,6 +250,42 @@ async function fetchProductInfo(shopId, itemId) {
         }
         return null;
     }
+}
+
+/**
+ * Fallback API để lấy thông tin sản phẩm
+ */
+async function fetchProductInfoFallback(shopId, itemId) {
+    try {
+        // Thử dùng API endpoint khác
+        const url = `https://shopee.vn/api/v2/item/get?itemid=${itemId}&shopid=${shopId}`;
+        console.log(`🔗 Trying fallback API: ${url}`);
+
+        const response = await axios.get(url, {
+            timeout: 10000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': `https://shopee.vn/${shopId}.${itemId}`,
+                'Accept': 'application/json'
+            }
+        });
+
+        if (response.data?.item) {
+            const product = response.data.item;
+            const productInfo = {
+                name: product.name || 'Sản phẩm',
+                image: product.image || '',
+                sales: product.sold || 0,
+                rating: (product.rating_star || 0) / 2,
+                price: (product.price || 0) / 100000
+            };
+            console.log(`✅ Fallback API success: ${product.name}`);
+            return productInfo;
+        }
+    } catch (error) {
+        console.log('⚠️ Fallback API also failed:', error.message);
+    }
+    return null;
 }
 
 // ==================== ERROR HANDLERS ====================
