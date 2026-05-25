@@ -190,123 +190,182 @@ app.get('/api/resolve-link', verifyOrigin, async (req, res) => {
  */
 async function fetchProductInfo(shopId, itemId) {
     try {
-        const pageUrl = `https://shopee.vn/-i.${shopId}.${itemId}`;
-        console.log(`🔗 Scraping: ${pageUrl}`);
+        // Thử nhiều URL format - prioritize theo hiệu quả
+        const urlFormats = [
+            // Format 1: /product/shopId/itemId (Direct - BEST)
+            `https://shopee.vn/product/${shopId}/${itemId}`,
+            // Format 2: /product/shopId/itemId với affiliate params
+            `https://shopee.vn/product/${shopId}/${itemId}?mmp_pid=an_17396630390`,
+            // Format 3: Cũ (có thể 404)
+            `https://shopee.vn/-i.${shopId}.${itemId}`,
+        ];
 
-        const response = await axios.get(pageUrl, {
-            timeout: 10000,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'vi-VN,vi;q=0.9',
-                'Cache-Control': 'no-cache'
+        let html = null;
+        let workingUrl = null;
+
+        // Thử từng URL cho đến khi thành công
+        for (let pageUrl of urlFormats) {
+            try {
+                console.log(`🔗 Trying: ${pageUrl}`);
+                const response = await axios.get(pageUrl, {
+                    timeout: 8000,
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                        'Accept-Language': 'vi-VN,vi;q=0.9',
+                        'Cache-Control': 'no-cache',
+                        'Cookie': 'SPC_F=; SPC_T=;'
+                    }
+                });
+
+                if (response.status === 200 && response.data.length > 1000) {
+                    html = response.data;
+                    workingUrl = pageUrl;
+                    console.log(`✅ Got response from: ${pageUrl} (${response.data.length} bytes)`);
+                    break;
+                }
+            } catch (error) {
+                console.log(`⚠️ Failed: ${error.response?.status || error.message}`);
+                continue;
             }
-        });
+        }
 
-        const html = response.data;
+        if (!html) {
+            console.log('❌ Không thể lấy HTML từ bất kỳ URL nào');
+            return null;
+        }
 
-        // ==================== Cách 1: Extract JSON từ script tag ====================
+        // ==================== Extract JSON từ script ====================
         console.log('📝 Parsing HTML...');
 
         // Tìm script tag chứa product data
-        const scriptMatch = html.match(/<script[^>]*>([\s\S]*?)<\/script>/g);
+        const scriptMatches = html.match(/<script[^>]*>([\s\S]*?)<\/script>/g) || [];
+        console.log(`📊 Found ${scriptMatches.length} script tags`);
 
-        if (scriptMatch) {
-            for (let script of scriptMatch) {
-                // Tìm __INITIAL_STATE__ hoặc __data
-                if (script.includes('__INITIAL_STATE__') || script.includes('item')) {
-                    try {
-                        // Extract JSON
-                        const jsonMatch = script.match(/\{[\s\S]*\}/);
-                        if (jsonMatch) {
-                            const data = JSON.parse(jsonMatch[0]);
-                            const productInfo = extractProductFromData(data);
-                            if (productInfo) {
-                                console.log(`✅ Product scraped from script: ${productInfo.name}`);
-                                return productInfo;
-                            }
+        for (let i = 0; i < scriptMatches.length; i++) {
+            const script = scriptMatches[i];
+            if (script.includes('item') && script.includes('name') && script.length > 100) {
+                try {
+                    // Extract JSON string
+                    const jsonMatch = script.match(/\{[\s\S]*"name"[\s\S]*\}/);
+                    if (jsonMatch) {
+                        const data = JSON.parse(jsonMatch[0]);
+                        const productInfo = extractProductFromData(data);
+                        if (productInfo && productInfo.name && productInfo.name.length > 3) {
+                            console.log(`✅ Product from JSON script #${i}: ${productInfo.name}`);
+                            return productInfo;
                         }
-                    } catch (e) {
-                        // Continue searching
                     }
+                } catch (e) {
+                    // Continue searching
                 }
             }
         }
 
-        // ==================== Cách 2: Parse HTML với cheerio ====================
+        // ==================== Parse HTML với cheerio ====================
         console.log('🔍 Parsing with cheerio...');
         const $ = cheerio.load(html);
 
-        // Tìm product title từ h1 hoặc title tag
-        let productName = $('h1').first().text() || $('title').text() || '';
+        // Debug: Log available data
+        console.log('📊 Page title:', $('title').text().substring(0, 100));
+
+        // Tìm product title - cách 1: h1
+        let productName = $('h1').first().text().trim();
+
+        // Cách 2: Meta og:title
+        if (!productName || productName.length < 3) {
+            productName = $('meta[property="og:title"]').attr('content') || '';
+        }
+
+        // Cách 3: h2
+        if (!productName || productName.length < 3) {
+            productName = $('h2').first().text().trim();
+        }
+
+        // Cách 4: Span chứa từ "product" hoặc "sản phẩm"
+        if (!productName || productName.length < 3) {
+            $('span, div, h1, h2, h3').each((i, elem) => {
+                const text = $(elem).text().trim();
+                if (text.length > 5 && text.length < 300 && !text.includes('http')) {
+                    productName = text;
+                    return false; // Break
+                }
+            });
+        }
 
         // Clean name
-        productName = productName.replace(/\s+/g, ' ').trim();
+        productName = productName
+            .replace(/\s+/g, ' ')
+            .trim()
+            .substring(0, 200);
+
         if (productName.includes('|')) {
             productName = productName.split('|')[0].trim();
         }
 
+        console.log(`📝 Product name: "${productName}"`);
+
         // Tìm hình ảnh
         let productImage = '';
-        const img = $('img[alt*="product"], img[alt*="Product"], img[class*="product"]').first();
-        if (img.length) {
-            productImage = img.attr('src') || '';
-        }
 
-        // Fallback: og:image
+        // Cách 1: og:image
+        productImage = $('meta[property="og:image"]').attr('content') || '';
+
+        // Cách 2: img tag có src mcdn hoặc shopee
         if (!productImage) {
-            productImage = $('meta[property="og:image"]').attr('content') || '';
+            $('img').each((i, elem) => {
+                const src = $(elem).attr('src');
+                if (src && (src.includes('mcdn') || src.includes('shopee') || src.includes('img'))) {
+                    productImage = src;
+                    return false; // break
+                }
+            });
         }
 
-        // Fallback: Bất kỳ img tag đầu tiên
+        // Cách 3: Bất kỳ img tag nào
         if (!productImage) {
-            productImage = $('img').first().attr('src') || '';
+            productImage = $('img[src]').first().attr('src') || '';
         }
 
-        // Tìm giá - thường ở trong span hoặc div với class chứa "price"
+        // Normalize image URL
+        if (productImage && !productImage.startsWith('http')) {
+            productImage = 'https:' + productImage;
+        }
+
+        console.log(`🖼️  Image: ${productImage ? 'Found' : 'Not found'}`);
+
+        // Tìm giá
         let price = 0;
-        const priceElements = $('span[class*="price"], div[class*="price"]');
-        if (priceElements.length) {
-            const priceText = priceElements.first().text();
+        const priceText = $('span[class*="price"], div[class*="price"]').first().text();
+        if (priceText) {
             const priceMatch = priceText.match(/[\d.,]+/);
             if (priceMatch) {
                 price = parseFloat(priceMatch[0].replace(/[.,]/g, '')) / 100000;
             }
         }
 
-        // Tìm rating - thường ở trong span hoặc div chứa "rating" hoặc star icon
+        // Tìm rating
         let rating = 0;
-        const ratingElements = $('span[class*="rating"], div[class*="rating"]');
-        if (ratingElements.length) {
-            const ratingText = ratingElements.first().text();
+        const ratingText = $('span[class*="rating"], div[class*="rating"]').first().text();
+        if (ratingText) {
             const ratingMatch = ratingText.match(/[\d.]+/);
             if (ratingMatch) {
-                rating = parseFloat(ratingMatch[0]) / 2; // Normalize to 0-5
+                rating = parseFloat(ratingMatch[0]) / 2;
             }
         }
 
-        // Tìm số lượt bán - thường ở trong span hoặc div chứa "sold"
+        // Tìm sales
         let sales = 0;
-        const salesElements = $('span[class*="sold"], div[class*="sold"]');
-        if (salesElements.length) {
-            const salesText = salesElements.first().text();
+        const salesText = $('span[class*="sold"], div[class*="sold"]').first().text();
+        if (salesText) {
             const salesMatch = salesText.match(/[\d.]+/);
             if (salesMatch) {
                 sales = parseFloat(salesMatch[0]);
             }
         }
 
-        // ==================== Cách 3: Meta tags ====================
-        if (!productName) {
-            productName = $('meta[property="og:title"]').attr('content') || 'Sản phẩm';
-        }
-
-        if (!productImage) {
-            productImage = $('meta[property="og:image"]').attr('content') || '';
-        }
-
-        // Nếu lấy được tên sản phẩm, return
-        if (productName && productName.length > 2) {
+        // Nếu lấy được tên, return
+        if (productName && productName.length > 3 && productName !== 'Sản phẩm') {
             const result = {
                 name: productName,
                 image: productImage,
@@ -315,13 +374,13 @@ async function fetchProductInfo(shopId, itemId) {
                 price: price
             };
             console.log(`✅ Product info extracted: ${result.name}`);
-            console.log(`   - Price: ${result.price}`);
-            console.log(`   - Rating: ${result.rating}/5`);
-            console.log(`   - Sales: ${result.sales}`);
+            if (price > 0) console.log(`   - Price: ${result.price}`);
+            if (rating > 0) console.log(`   - Rating: ${result.rating}/5`);
+            if (sales > 0) console.log(`   - Sales: ${result.sales}`);
             return result;
         }
 
-        console.log('⚠️ Không thể lấy thông tin sản phẩm từ HTML');
+        console.log('⚠️ Không thể lấy đủ thông tin sản phẩm');
         return null;
 
     } catch (error) {
