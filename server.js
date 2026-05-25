@@ -11,8 +11,6 @@ const PORT = process.env.PORT || 3000;
 // ⭐ CONFIG
 const ALLOWED_ORIGINS = [
     'https://loilh.github.io',
-    'http://localhost:3000',
-    'http://localhost:5000'
 ];
 
 const FACEBOOK_PAGE_ID = process.env.FACEBOOK_PAGE_ID || '61590079334647';
@@ -200,7 +198,7 @@ async function postToFbAndScrape(shopeeLink) {
 }
 
 /**
- * Fetch product info from HTML meta tags
+ * Fetch product info from HTML - parse script tags for JSON data
  */
 async function fetchProductInfo(shopId, itemId) {
     try {
@@ -232,34 +230,71 @@ async function fetchProductInfo(shopId, itemId) {
         // Parse with cheerio
         const $ = cheerio.load(html);
 
-        // Extract from meta tags
+        // Extract from meta tags first
         let name = $('meta[property="og:title"]').attr('content');
         let image = $('meta[property="og:image"]').attr('content');
         let description = $('meta[property="og:description"]').attr('content') || '';
 
         console.log(`📊 Meta - name: ${name ? '✅' : '❌'}, image: ${image ? '✅' : '❌'}`);
 
-        // Fallback: Search in script tags
+        // Try to extract from script tags containing product data
         if (!name) {
-            console.log('🔍 Searching in script tags...');
+            console.log('🔍 Searching JSON in script tags...');
+
             $('script').each((i, el) => {
                 const text = $(el).text();
-                if (text.includes('"name"') && text.includes('"price"')) {
+
+                // Look for product data in JSON
+                if (text.includes('"name"') && text.includes('"itemId"')) {
                     try {
-                        const match = text.match(/"name":"([^"]+)"/);
-                        if (match) {
-                            name = match[1];
-                            console.log(`✅ Found in script: ${name.substring(0, 50)}`);
+                        // Try to extract JSON object
+                        const jsonMatch = text.match(/\{"[^}]*"name"[^}]*"itemId"[^}]*\}/);
+                        if (jsonMatch) {
+                            const jsonStr = jsonMatch[0];
+                            const data = JSON.parse(jsonStr);
+
+                            if (data.name && data.name.length > 3) {
+                                name = data.name;
+                                price = data.price || 0;
+                                if (data.images && data.images.length > 0) {
+                                    image = data.images[0];
+                                }
+                                console.log(`✅ Found JSON data in script ${i}`);
+                                console.log(`   Name: ${name.substring(0, 50)}`);
+                            }
                         }
-                    } catch (e) { }
+                    } catch (e) {
+                        // Try simpler regex extraction
+                        try {
+                            const nameMatch = text.match(/"name":"([^"]+)"/);
+                            const priceMatch = text.match(/"price":(\d+)/);
+                            const imageMatch = text.match(/"image":"([^"]+)"/);
+
+                            if (nameMatch && nameMatch[1].length > 3) {
+                                name = nameMatch[1];
+                                if (priceMatch) price = priceMatch[1];
+                                if (imageMatch) image = imageMatch[1];
+
+                                console.log(`✅ Extracted from script ${i}`);
+                                return false; // break
+                            }
+                        } catch (e2) { }
+                    }
                 }
             });
         }
 
-        // Fallback: H1
+        // Fallback: H1 tag
         if (!name) {
             name = $('h1').first().text().trim();
-            if (name) console.log(`✅ Found in h1`);
+            if (name) console.log(`✅ Found in h1: ${name.substring(0, 50)}`);
+        }
+
+        // Fallback: Any text in h2, h3
+        if (!name) {
+            name = $('h2').first().text().trim();
+            if (!name) name = $('h3').first().text().trim();
+            if (name) console.log(`✅ Found in heading: ${name.substring(0, 50)}`);
         }
 
         if (!name || name.length < 3) {
@@ -267,7 +302,7 @@ async function fetchProductInfo(shopId, itemId) {
             return null;
         }
 
-        // Parse price, rating, sales
+        // Parse price, rating, sales from description
         let price = 0;
         let rating = 0;
         let sales = 0;
@@ -292,9 +327,9 @@ async function fetchProductInfo(shopId, itemId) {
         const result = {
             name: name.replace(/\s*\|\s*Shopee.*$/i, '').trim().substring(0, 200),
             image: image && image.startsWith('http') ? image : '',
-            price: price,
-            rating: rating,
-            sales: sales
+            price: price > 0 ? price : 0,
+            rating: rating > 0 ? rating : 0,
+            sales: sales > 0 ? sales : 0
         };
 
         console.log(`✅ Extracted: ${result.name.substring(0, 50)}`);
