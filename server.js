@@ -1,6 +1,8 @@
 // server.js - Resolve short URL → Comment FB (1 post/ngày) → Lấy OG từ short URL
 const express = require('express');
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
@@ -20,8 +22,23 @@ const FACEBOOK_APP_TOKEN = process.env.FACEBOOK_APP_TOKEN || '';
 const linkCache = new Map();
 const CACHE_TIME = 1000 * 60 * 60;
 
-// 1 post mỗi ngày trên Page
-let dailyPost = { id: null, date: null };
+// Daily post — persist ra file để không mất khi restart
+const STATE_FILE = path.join(__dirname, '.daily-post.json');
+
+function loadDailyPost() {
+    try {
+        if (fs.existsSync(STATE_FILE)) {
+            return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+        }
+    } catch (_) {}
+    return { id: null, date: null };
+}
+
+function saveDailyPost(data) {
+    try { fs.writeFileSync(STATE_FILE, JSON.stringify(data)); } catch (_) {}
+}
+
+let dailyPost = loadDailyPost();
 
 // ==================== MIDDLEWARE ====================
 
@@ -181,28 +198,18 @@ async function getProductInfoViaFbPost(shortUrl) {
             return null;
         }
 
-        // Parse price/rating/sales từ description
-        let price = 0, rating = 0, sales = 0;
-        const priceMatch = description.match(/₫\s*([0-9,.]+)/);
-        if (priceMatch) price = parseFloat(priceMatch[1].replace(/[,.]/g, '')) / 100000;
-
-        const ratingMatch = description.match(/(\d+(?:\.\d+)?)\s*\/\s*5/);
-        if (ratingMatch) rating = parseFloat(ratingMatch[1]);
-
-        const salesMatch = description.match(/(\d+(?:\.\d+)?k?)\s*(?:đã bán|sold)/i);
-        if (salesMatch) sales = parseFloat(salesMatch[1]) * (salesMatch[1].endsWith('k') ? 1000 : 1);
-
+        // Shopee OG description là text marketing, không có rating/sales/price
+        // → chỉ lấy được name + image từ FB attachment
         const productInfo = {
             name: title.replace(/\s*\|\s*Shopee.*$/i, '').trim().substring(0, 200),
             image: imageUrl.startsWith('http') ? imageUrl : '',
-            price,
-            rating,
-            sales
+            price: 0,
+            rating: 0,
+            sales: 0
         };
 
         console.log(`✅ Product: ${productInfo.name.substring(0, 60)}`);
-        if (price > 0)  console.log(`   💰 ${price}k`);
-        if (rating > 0) console.log(`   ⭐ ${rating}/5`);
+        console.log(`   🖼️  Image: ${productInfo.image ? 'có' : 'không'}`);
         return productInfo;
 
     } catch (e) {
@@ -243,6 +250,7 @@ async function getOrCreateDailyPost() {
     );
 
     dailyPost = { id: r.data.id, date: today };
+    saveDailyPost(dailyPost);
     console.log(`✅ Post: ${dailyPost.id}`);
     return dailyPost.id;
 }
