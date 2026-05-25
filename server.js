@@ -107,16 +107,14 @@ app.get('/api/resolve-link', async (req, res) => {
 
         console.log(`📝 shop=${shopId}, item=${itemId}`);
 
-        // Lấy OG data từ Facebook (dùng short URL gốc — FB tự crawl, như khi share qua Mess)
+        // Lấy product info + comment FB song song
         let productInfo = null;
-        if (FACEBOOK_APP_TOKEN) {
-            productInfo = await getOgFromFacebook(url);  // url = short URL gốc (s.shopee.vn/...)
-        }
-
-        // Comment lên Facebook page (1 post/ngày)
         let facebookPostId = null;
         if (FACEBOOK_APP_TOKEN) {
-            facebookPostId = await commentToFacebook(cleanUrl, productInfo);
+            // Post tạm với link → FB dùng full crawler (giống Messenger) → đọc lại → xóa post
+            productInfo = await getProductInfoViaFbPost(url);  // short URL gốc
+            // Comment short URL vào post ngày hôm nay (giữ affiliate tracking)
+            facebookPostId = await commentToFacebook(url, productInfo);
         }
 
         const result = { originalUrl: url, resolvedUrl: cleanUrl, productInfo, facebookPostId, cached: false };
@@ -134,56 +132,47 @@ app.get('/api/resolve-link', async (req, res) => {
 // ==================== FACEBOOK ====================
 
 /**
- * Lấy OG data từ Facebook bằng cách truyền SHORT URL gốc
- * Facebook tự follow redirect → crawl Shopee → trả về product info
- * (Giống như khi share link qua Messenger)
+ * Lấy product info bằng cách POST link lên FB feed (private) rồi đọc lại link preview
+ *
+ * Khi POST với `link` param, Facebook dùng FULL crawler (giống Messenger)
+ * → crawl JS, lấy đúng product OG → ta đọc fields name/description/picture → xóa post
  */
-async function getOgFromFacebook(shortUrl) {
+async function getProductInfoViaFbPost(shortUrl) {
+    let tempPostId = null;
     try {
-        console.log('🕷️  FB OG scrape (short URL)...');
+        console.log('🕷️  Post tạm lên FB để lấy link preview...');
 
-        // Trigger scrape với short URL — FB sẽ follow redirect như bình thường
-        const formData = new URLSearchParams({
-            id: shortUrl,
-            scrape: 'true',
-            access_token: FACEBOOK_APP_TOKEN
-        });
-
-        const scrapeRes = await axios.post(
-            'https://graph.facebook.com/v22.0/',
-            formData.toString(),
-            { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+        // Post PRIVATE (chỉ mình xem) với `link` param để FB crawl đúng
+        const postRes = await axios.post(
+            `https://graph.facebook.com/v22.0/${FACEBOOK_PAGE_ID}/feed`,
+            {
+                message: '.',
+                link: shortUrl,
+                published: false,          // không publish ra ngoài
+                access_token: FACEBOOK_APP_TOKEN
+            }
         );
+        tempPostId = postRes.data.id;
+        console.log(`   Post tạm: ${tempPostId}`);
 
-        // Đọc OG data FB vừa crawl
-        const og = scrapeRes.data?.og_object || scrapeRes.data;
-
-        // Thử đọc trực tiếp từ scrape response trước
-        let title = og?.title || og?.name;
-        let description = og?.description || '';
-        let imageUrl = '';
-
-        if (!title) {
-            // Nếu không có trong scrape response, GET lại
-            const getRes = await axios.get('https://graph.facebook.com/v22.0/', {
+        // Đọc lại link preview FB vừa crawl
+        const readRes = await axios.get(
+            `https://graph.facebook.com/v22.0/${tempPostId}`,
+            {
                 params: {
-                    id: shortUrl,
-                    fields: 'og_object{title,description,image}',
+                    fields: 'name,description,picture,full_picture',
                     access_token: FACEBOOK_APP_TOKEN
                 }
-            });
-            const ogObj = getRes.data?.og_object;
-            title = ogObj?.title;
-            description = ogObj?.description || '';
-            const img = ogObj?.image;
-            imageUrl = Array.isArray(img) ? (img[0]?.url || '') : (img?.url || '');
-        } else {
-            const img = og?.image;
-            imageUrl = Array.isArray(img) ? (img[0]?.url || '') : (img?.url || '');
-        }
+            }
+        );
+
+        const d = readRes.data;
+        const title = d.name || '';
+        const description = d.description || '';
+        const imageUrl = d.full_picture || d.picture || '';
 
         if (!title || title.toLowerCase().includes('shopee việt nam')) {
-            console.log('⚠️ FB OG: chỉ lấy được homepage title, bỏ qua');
+            console.log('⚠️ FB link preview: vẫn chỉ có homepage title');
             return null;
         }
 
@@ -206,15 +195,25 @@ async function getOgFromFacebook(shortUrl) {
             sales
         };
 
-        console.log(`✅ OG: ${productInfo.name.substring(0, 60)}`);
+        console.log(`✅ Product: ${productInfo.name.substring(0, 60)}`);
         if (price > 0)  console.log(`   💰 ${price}k`);
         if (rating > 0) console.log(`   ⭐ ${rating}/5`);
         return productInfo;
 
     } catch (e) {
-        console.log(`⚠️ FB OG lỗi: ${e.message}`);
+        console.log(`⚠️ FB post tạm lỗi: ${e.message}`);
         if (e.response) console.log('   ', JSON.stringify(e.response.data));
         return null;
+    } finally {
+        // Xóa post tạm dù thành công hay lỗi
+        if (tempPostId) {
+            try {
+                await axios.delete(`https://graph.facebook.com/v22.0/${tempPostId}`, {
+                    params: { access_token: FACEBOOK_APP_TOKEN }
+                });
+                console.log(`🗑️  Đã xóa post tạm`);
+            } catch (_) {}
+        }
     }
 }
 
