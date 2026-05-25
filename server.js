@@ -74,26 +74,36 @@ app.get('/api/resolve-link', async (req, res) => {
             }
         }
 
-        // Resolve short URL
-        console.log('🔗 Resolving short URL...');
         let resolvedUrl = url;
 
-        try {
-            const response = await axios.get(url, {
-                maxRedirects: 5,
-                timeout: 8000,
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                }
-            });
-            resolvedUrl = response.request.res.responseUrl || response.config.url;
-        } catch (error) {
-            if (error.response?.status === 301 || error.response?.status === 302) {
-                resolvedUrl = error.response.headers.location || url;
+        // Check if URL contains origin_link parameter (affiliate URL)
+        const originLinkMatch = url.match(/origin_link=([^&]+)/);
+        if (originLinkMatch) {
+            try {
+                resolvedUrl = decodeURIComponent(originLinkMatch[1]);
+                console.log(`✅ Extracted origin_link: ${resolvedUrl}`);
+            } catch (e) {
+                console.log('⚠️ Could not decode origin_link, will resolve normally');
             }
+        } else {
+            // Normal short URL - resolve redirect
+            console.log('🔗 Resolving short URL...');
+            try {
+                const response = await axios.get(url, {
+                    maxRedirects: 5,
+                    timeout: 8000,
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    }
+                });
+                resolvedUrl = response.request.res.responseUrl || response.config.url;
+            } catch (error) {
+                if (error.response?.status === 301 || error.response?.status === 302) {
+                    resolvedUrl = error.response.headers.location || url;
+                }
+            }
+            console.log(`✅ Short link resolved: ${resolvedUrl}`);
         }
-
-        console.log(`✅ Short link resolved: ${resolvedUrl}`);
 
         // Extract shopId & itemId từ URL
         // Format: /shopname/shopid/itemid or /shopname/shopid/itemid?...
