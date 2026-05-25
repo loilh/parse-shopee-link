@@ -170,10 +170,18 @@ async function fetchProductInfo(shopId, itemId) {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'vi-VN,vi;q=0.9',
+                'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
                 'Referer': 'https://shopee.vn/',
-                'Cache-Control': 'no-cache'
-            }
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none'
+            },
+            // Add cookies
+            jar: true,
+            withCredentials: true
         });
 
         const html = response.data;
@@ -182,42 +190,73 @@ async function fetchProductInfo(shopId, itemId) {
         // Parse with cheerio
         const $ = cheerio.load(html);
 
-        // Extract from meta tags
-        const name = $('meta[property="og:title"]').attr('content') || $('title').text() || 'Sản phẩm';
-        const image = $('meta[property="og:image"]').attr('content') || '';
-        const description = $('meta[property="og:description"]').attr('content') || '';
+        // Try multiple methods to extract data
 
-        // Parse price từ description hoặc tìm trong HTML
+        // Method 1: Meta tags
+        let name = $('meta[property="og:title"]').attr('content');
+        let image = $('meta[property="og:image"]').attr('content');
+        let description = $('meta[property="og:description"]').attr('content');
+
+        console.log(`📊 Meta - name: ${name ? 'Found' : 'Not found'}, image: ${image ? 'Found' : 'Not found'}`);
+
+        // Method 2: Script tags with product data
+        if (!name) {
+            console.log('🔍 Searching in script tags...');
+            $('script').each((i, el) => {
+                const text = $(el).text();
+                if (text.includes('"name"') && text.includes('"price"')) {
+                    try {
+                        // Try to extract JSON
+                        const match = text.match(/\{"name":"([^"]+)"[^}]*"price":(\d+)/);
+                        if (match) {
+                            name = match[1];
+                            console.log(`✅ Found name in script ${i}: ${name}`);
+                        }
+                    } catch (e) { }
+                }
+            });
+        }
+
+        // Method 3: H1 tag
+        if (!name) {
+            name = $('h1').first().text().trim();
+            if (name) console.log(`✅ Found name in h1: ${name}`);
+        }
+
+        // Fallback
+        if (!name || name.length < 3 || name === 'Sản phẩm') {
+            console.log('⚠️ Could not extract valid product name');
+            return null;
+        }
+
+        // Parse price, rating, sales from description or HTML
         let price = 0;
         let rating = 0;
         let sales = 0;
 
-        // Try to find price pattern in description
-        const priceMatch = description.match(/₫\s*([\d.]+)/);
-        if (priceMatch) {
-            price = parseFloat(priceMatch[1].replace(/\./g, '')) / 100000;
-        }
+        if (description) {
+            // Pattern: ₫ 99.000 or ₫99000
+            const priceMatch = description.match(/₫\s*([0-9,.]+)\s*(?:đ|$)/);
+            if (priceMatch) {
+                price = parseFloat(priceMatch[1].replace(/[,.]/g, '')) / 100000;
+            }
 
-        // Try to find rating pattern
-        const ratingMatch = description.match(/(\d+(?:\.\d+)?)\s*\/\s*5/);
-        if (ratingMatch) {
-            rating = parseFloat(ratingMatch[1]);
-        }
+            // Pattern: 4.5/5 hoặc ⭐4.5
+            const ratingMatch = description.match(/(?:⭐|★)?(\d+(?:\.\d+)?)\s*\/\s*5/);
+            if (ratingMatch) {
+                rating = parseFloat(ratingMatch[1]);
+            }
 
-        // Try to find sales pattern
-        const salesMatch = description.match(/(\d+)k?\s*(?:sold|đã bán)/i);
-        if (salesMatch) {
-            sales = parseFloat(salesMatch[1]);
-        }
-
-        if (!name || name.length < 3) {
-            console.log('⚠️ Could not extract product name');
-            return null;
+            // Pattern: 1.2k đã bán hoặc 1200 sold
+            const salesMatch = description.match(/(\d+(?:\.\d+)?)[k]?\s*(?:đã bán|sold)/i);
+            if (salesMatch) {
+                sales = parseFloat(salesMatch[1]) * (description.match(/\d+k/i) ? 1000 : 1);
+            }
         }
 
         const result = {
-            name: name.replace(/\s*\|\s*Shopee/i, '').trim(),
-            image: image,
+            name: name.replace(/\s*\|\s*Shopee.*$/i, '').trim().substring(0, 200),
+            image: image && image.startsWith('http') ? image : '',
             price: price,
             rating: rating,
             sales: sales
