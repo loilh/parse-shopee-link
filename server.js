@@ -269,6 +269,21 @@ async function fetchProductInfo(shopId, itemId) {
         // Debug: Log available data
         console.log('📊 Page title:', $('title').text().substring(0, 100));
 
+        // Debug: Log HTML elements
+        console.log(`📊 h1 count: ${$('h1').length}`);
+        console.log(`📊 h2 count: ${$('h2').length}`);
+        console.log(`📊 img count: ${$('img').length}`);
+        console.log(`📊 span[class*="price"] count: ${$('span[class*="price"]').length}`);
+
+        // Log first few h1/h2
+        $('h1').slice(0, 3).each((i, elem) => {
+            console.log(`  h1[${i}]: ${$(elem).text().substring(0, 80)}`);
+        });
+
+        $('h2').slice(0, 3).each((i, elem) => {
+            console.log(`  h2[${i}]: ${$(elem).text().substring(0, 80)}`);
+        });
+
         // Tìm product title - cách 1: h1
         let productName = $('h1').first().text().trim();
 
@@ -310,6 +325,7 @@ async function fetchProductInfo(shopId, itemId) {
 
         // Cách 1: og:image
         productImage = $('meta[property="og:image"]').attr('content') || '';
+        console.log(`  og:image: ${productImage ? 'Found' : 'Not found'}`);
 
         // Cách 2: img tag có src mcdn hoặc shopee
         if (!productImage) {
@@ -317,6 +333,7 @@ async function fetchProductInfo(shopId, itemId) {
                 const src = $(elem).attr('src');
                 if (src && (src.includes('mcdn') || src.includes('shopee') || src.includes('img'))) {
                     productImage = src;
+                    console.log(`  Found img[${i}]: ${src.substring(0, 60)}`);
                     return false; // break
                 }
             });
@@ -324,7 +341,11 @@ async function fetchProductInfo(shopId, itemId) {
 
         // Cách 3: Bất kỳ img tag nào
         if (!productImage) {
-            productImage = $('img[src]').first().attr('src') || '';
+            const firstImg = $('img[src]').first();
+            if (firstImg.length) {
+                productImage = firstImg.attr('src') || '';
+                console.log(`  Fallback img: ${productImage.substring(0, 60)}`);
+            }
         }
 
         // Normalize image URL
@@ -336,8 +357,11 @@ async function fetchProductInfo(shopId, itemId) {
 
         // Tìm giá
         let price = 0;
-        const priceText = $('span[class*="price"], div[class*="price"]').first().text();
-        if (priceText) {
+        const priceElements = $('span[class*="price"], div[class*="price"]');
+        console.log(`  price elements: ${priceElements.length}`);
+        if (priceElements.length > 0) {
+            const priceText = priceElements.first().text();
+            console.log(`  price text: ${priceText.substring(0, 60)}`);
             const priceMatch = priceText.match(/[\d.,]+/);
             if (priceMatch) {
                 price = parseFloat(priceMatch[0].replace(/[.,]/g, '')) / 100000;
