@@ -156,20 +156,21 @@ async function getProductInfoViaFbPost(shortUrl) {
         console.log(`   Post tạm: ${tempPostId}`);
 
         // Đọc lại link preview FB vừa crawl
+        // (v3.3+ dùng `attachments` thay vì name/description/picture đã deprecated)
         const readRes = await axios.get(
             `https://graph.facebook.com/v22.0/${tempPostId}`,
             {
                 params: {
-                    fields: 'name,description,picture,full_picture',
+                    fields: 'attachments{title,description,media,url,type}',
                     access_token: FACEBOOK_APP_TOKEN
                 }
             }
         );
 
-        const d = readRes.data;
-        const title = d.name || '';
-        const description = d.description || '';
-        const imageUrl = d.full_picture || d.picture || '';
+        const attachment = readRes.data?.attachments?.data?.[0] || {};
+        const title = attachment.title || '';
+        const description = attachment.description || '';
+        const imageUrl = attachment.media?.image?.src || '';
 
         if (!title || title.toLowerCase().includes('shopee việt nam')) {
             console.log('⚠️ FB link preview: vẫn chỉ có homepage title');
