@@ -52,7 +52,7 @@ app.use(express.json());
 
 // ==================== API ROUTES ====================
 
-app.get('/api/health', (req, res) => {
+app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
@@ -136,13 +136,15 @@ app.get('/api/resolve-link', async (req, res) => {
 
         console.log(`📝 IDs: shop=${shopId}, item=${itemId}`);
 
-        let productInfo = null;
-        let facebookPostId = null;
+        // Lấy thông tin sản phẩm từ Facebook OG cache (Shopee API bị block)
+        const productInfo = FACEBOOK_APP_TOKEN
+            ? await getProductInfoFromFacebookOG(resolvedUrl)
+            : null;
 
+        // Comment lên Facebook (nếu có token)
+        let facebookPostId = null;
         if (FACEBOOK_APP_TOKEN) {
-            const result = await commentToFbAndGetOgData(resolvedUrl);
-            productInfo = result.productInfo;
-            facebookPostId = result.postId;
+            facebookPostId = await commentToFacebook(resolvedUrl, productInfo);
         } else {
             console.log('⚠️ FACEBOOK_APP_TOKEN not set');
         }
@@ -198,81 +200,94 @@ async function getOrCreateDailyPost() {
 }
 
 /**
- * Comment link vào post ngày hôm nay + lấy OG data từ Facebook
+ * Lấy thông tin sản phẩm từ Facebook OG cache
+ * Facebook crawl Shopee (kể cả SPA) và lưu OG data → ta đọc lại từ FB
+ *
+ * Flow:
+ *   1. POST scrape=true  → force FB crawl URL (nếu chưa có cache)
+ *   2. GET og_object     → đọc name, image, description mà FB đã crawl
  */
-async function commentToFbAndGetOgData(shopeeLink) {
+async function getProductInfoFromFacebookOG(shopeeLink) {
     try {
-        // Bước 1: Trigger Facebook crawl OG data trước
-        console.log('🕷️ Trigger FB crawl OG...');
-        let productInfo = null;
-        try {
-            // POST scrape để FB crawl URL này
-            await axios.post(
-                `https://graph.facebook.com/v22.0/`,
-                null,
-                {
-                    params: {
-                        id: shopeeLink,
-                        scrape: true,
-                        access_token: FACEBOOK_APP_TOKEN
-                    }
-                }
-            );
+        // Bước 1: POST với form-data (không phải query string!)
+        console.log('🕷️  FB OG scrape...');
+        const formData = new URLSearchParams();
+        formData.append('id', shopeeLink);
+        formData.append('scrape', 'true');
+        formData.append('access_token', FACEBOOK_APP_TOKEN);
 
-            // Lấy OG data mà FB đã crawl
-            const ogRes = await axios.get(
-                `https://graph.facebook.com/v22.0/`,
-                {
-                    params: {
-                        id: shopeeLink,
-                        fields: 'og_object{title,description,image}',
-                        access_token: FACEBOOK_APP_TOKEN
-                    }
-                }
-            );
+        await axios.post(
+            'https://graph.facebook.com/v22.0/',
+            formData.toString(),
+            { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+        );
 
-            const og = ogRes.data?.og_object;
-            if (og?.title) {
-                const rawDesc = og.description || '';
-
-                let price = 0, rating = 0, sales = 0;
-
-                const priceMatch = rawDesc.match(/₫\s*([0-9,.]+)/);
-                if (priceMatch) price = parseFloat(priceMatch[1].replace(/[,.]/g, '')) / 100000;
-
-                const ratingMatch = rawDesc.match(/(\d+(?:\.\d+)?)\s*\/\s*5/);
-                if (ratingMatch) rating = parseFloat(ratingMatch[1]);
-
-                const salesMatch = rawDesc.match(/(\d+(?:\.\d+)?)[k]?\s*(?:đã bán|sold)/i);
-                if (salesMatch) sales = parseFloat(salesMatch[1]) * (rawDesc.match(/\d+k/i) ? 1000 : 1);
-
-                const imageUrl = og.image?.[0]?.url || og.image?.url || '';
-
-                productInfo = {
-                    name: og.title.replace(/\s*\|\s*Shopee.*$/i, '').trim().substring(0, 200),
-                    image: imageUrl.startsWith('http') ? imageUrl : '',
-                    price,
-                    rating,
-                    sales
-                };
-
-                console.log(`✅ OG từ FB: ${productInfo.name.substring(0, 60)}`);
-                if (productInfo.price > 0)  console.log(`   Price:  ${productInfo.price}`);
-                if (productInfo.rating > 0) console.log(`   Rating: ${productInfo.rating}/5`);
-                if (productInfo.sales > 0)  console.log(`   Sales:  ${productInfo.sales}`);
-            } else {
-                console.log('⚠️ FB chưa có OG data cho URL này');
+        // Bước 2: GET og_object
+        const ogRes = await axios.get('https://graph.facebook.com/v22.0/', {
+            params: {
+                id: shopeeLink,
+                fields: 'og_object{title,description,image}',
+                access_token: FACEBOOK_APP_TOKEN
             }
-        } catch (e) {
-            console.log(`⚠️ Không lấy được OG từ FB: ${e.message}`);
+        });
+
+        const og = ogRes.data?.og_object;
+        if (!og?.title) {
+            console.log('⚠️ FB OG: không có title');
+            return null;
         }
 
-        // Bước 2: Comment link vào post ngày hôm nay (không tạo post mới)
-        console.log('💬 Comment link vào post ngày hôm nay...');
+        const desc = og.description || '';
+        let price = 0, rating = 0, sales = 0;
+
+        const priceMatch = desc.match(/₫\s*([0-9,.]+)/);
+        if (priceMatch) price = parseFloat(priceMatch[1].replace(/[,.]/g, '')) / 100000;
+
+        const ratingMatch = desc.match(/(\d+(?:\.\d+)?)\s*\/\s*5/);
+        if (ratingMatch) rating = parseFloat(ratingMatch[1]);
+
+        const salesMatch = desc.match(/(\d+(?:\.\d+)?k?)\s*(?:đã bán|sold)/i);
+        if (salesMatch) {
+            sales = parseFloat(salesMatch[1]) * (salesMatch[1].endsWith('k') ? 1000 : 1);
+        }
+
+        // Lấy image URL từ array hoặc object
+        const imageUrl = Array.isArray(og.image)
+            ? (og.image[0]?.url || '')
+            : (og.image?.url || '');
+
+        const productInfo = {
+            name: og.title.replace(/\s*\|\s*Shopee.*$/i, '').trim().substring(0, 200),
+            image: imageUrl.startsWith('http') ? imageUrl : '',
+            price,
+            rating,
+            sales
+        };
+
+        console.log(`✅ FB OG: ${productInfo.name.substring(0, 60)}`);
+        if (productInfo.price > 0)  console.log(`   Price:  ${productInfo.price}k`);
+        if (productInfo.rating > 0) console.log(`   Rating: ${productInfo.rating}/5`);
+        if (productInfo.sales > 0)  console.log(`   Sales:  ${productInfo.sales}`);
+
+        return productInfo;
+
+    } catch (e) {
+        console.log(`⚠️ FB OG lỗi: ${e.message}`);
+        if (e.response) console.log('   Detail:', JSON.stringify(e.response.data));
+        return null;
+    }
+}
+
+/**
+ * Comment link vào post ngày hôm nay trên Facebook
+ * Token cần có: pages_manage_posts + pages_manage_engagement
+ */
+async function commentToFacebook(shopeeLink, productInfo) {
+    try {
         const postId = await getOrCreateDailyPost();
 
         const commentText = productInfo
-            ? `${productInfo.name.substring(0, 80)}\n${shopeeLink}`
+            ? `${productInfo.name.substring(0, 80)}\n💰 ${productInfo.price}k${productInfo.rating > 0 ? `  ⭐ ${productInfo.rating}/5` : ''}\n${shopeeLink}`
             : shopeeLink;
 
         await axios.post(
@@ -283,15 +298,14 @@ async function commentToFbAndGetOgData(shopeeLink) {
             }
         );
         console.log(`✅ Đã comment vào post ${postId}`);
-
-        return { productInfo, postId };
+        return postId;
 
     } catch (error) {
-        console.log(`❌ FB failed: ${error.message}`);
+        console.log(`❌ FB comment failed: ${error.message}`);
         if (error.response) {
             console.log(`   Detail:`, JSON.stringify(error.response.data, null, 2));
         }
-        return { productInfo: null, postId: null };
+        return null;
     }
 }
 
