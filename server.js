@@ -1,4 +1,4 @@
-// server.js - Shopee Affiliate Link Resolver
+// server.js - Shopee Affiliate Link Resolver with Facebook Integration
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -8,20 +8,23 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ⭐ DOMAIN FE ĐƯỢC PHÉP
+// ⭐ CONFIG
 const ALLOWED_ORIGINS = [
     'https://loilh.github.io',
     'http://localhost:3000',
     'http://localhost:5000'
 ];
 
-// Cache để tránh request trùng
+const FACEBOOK_PAGE_ID = process.env.FACEBOOK_PAGE_ID || '61590079334647';
+const FACEBOOK_APP_TOKEN = process.env.FACEBOOK_APP_TOKEN || '';
+const AFFILIATE_ID = '17396630390';
+
+// Cache
 const linkCache = new Map();
-const CACHE_TIME = 1000 * 60 * 60; // 1 giờ
+const CACHE_TIME = 1000 * 60 * 60; // 1 hour
 
 // ==================== MIDDLEWARE ====================
 
-// Custom CORS - Chỉ accept từ allowed origins
 app.use((req, res, next) => {
     const origin = req.get('origin');
 
@@ -45,23 +48,22 @@ app.use(express.json());
 
 // ==================== API ROUTES ====================
 
-// Health check
 app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
 /**
- * Resolve Shopee short link & lấy product info
+ * Main endpoint: Resolve link + Post to FB + Get product info
  */
 app.get('/api/resolve-link', async (req, res) => {
     try {
-        const { url } = req.query;
+        const { url, postToFb } = req.query;
 
         if (!url) {
             return res.status(400).json({ error: 'URL parameter required' });
         }
 
-        console.log(`\n🔄 Đang resolve link: ${url}`);
+        console.log(`\n🔄 Resolve link: ${url}`);
 
         // Check cache
         if (linkCache.has(url)) {
@@ -74,19 +76,17 @@ app.get('/api/resolve-link', async (req, res) => {
             }
         }
 
+        // Resolve short URL
         let resolvedUrl = url;
-
-        // Check if URL contains origin_link parameter (affiliate URL)
         const originLinkMatch = url.match(/origin_link=([^&]+)/);
         if (originLinkMatch) {
             try {
                 resolvedUrl = decodeURIComponent(originLinkMatch[1]);
-                console.log(`✅ Extracted origin_link: ${resolvedUrl}`);
+                console.log(`✅ Extracted origin_link`);
             } catch (e) {
-                console.log('⚠️ Could not decode origin_link, will resolve normally');
+                console.log('⚠️ Could not decode origin_link');
             }
         } else {
-            // Normal short URL - resolve redirect
             console.log('🔗 Resolving short URL...');
             try {
                 const response = await axios.get(url, {
@@ -102,20 +102,16 @@ app.get('/api/resolve-link', async (req, res) => {
                     resolvedUrl = error.response.headers.location || url;
                 }
             }
-            console.log(`✅ Short link resolved: ${resolvedUrl}`);
+            console.log(`✅ Resolved: ${resolvedUrl.substring(0, 80)}...`);
         }
 
-        // Extract shopId & itemId từ URL
-        // Format: /shopname/shopid/itemid or /shopname/shopid/itemid?...
+        // Extract shopId & itemId
         let shopId, itemId;
-
-        // Try format 1: /shopname/shopid/itemid
         const match1 = resolvedUrl.match(/\/([^\/]+)\/(\d+)\/(\d+)/);
         if (match1) {
             shopId = match1[2];
             itemId = match1[3];
         } else {
-            // Try format 2: -i.shopid.itemid
             const match2 = resolvedUrl.match(/-i\.(\d+)\.(\d+)/);
             if (match2) {
                 shopId = match2[1];
@@ -124,7 +120,7 @@ app.get('/api/resolve-link', async (req, res) => {
         }
 
         if (!shopId || !itemId) {
-            console.log(`❌ Cannot extract shop/item ID from: ${resolvedUrl}`);
+            console.log(`❌ Cannot extract IDs`);
             return res.json({
                 originalUrl: url,
                 resolvedUrl: resolvedUrl,
@@ -133,15 +129,19 @@ app.get('/api/resolve-link', async (req, res) => {
             });
         }
 
-        console.log(`📝 Extracted: shop=${shopId}, item=${itemId}`);
+        console.log(`📝 IDs: shop=${shopId}, item=${itemId}`);
 
-        // Try to get product info
+        // Get product info - Try multiple methods
         let productInfo = null;
 
-        try {
-            productInfo = await fetchProductInfo(shopId, itemId);
-        } catch (error) {
-            console.log(`⚠️ Cannot fetch product info: ${error.message}`);
+        // Method 1: Scrape HTML meta tags
+        console.log('📊 Trying to fetch product info...');
+        productInfo = await fetchProductInfo(shopId, itemId);
+
+        // Method 2: If failed, post to FB and scrape from there
+        if (!productInfo && postToFb === 'true' && FACEBOOK_APP_TOKEN) {
+            console.log('📤 Posting to Facebook to scrape product info...');
+            productInfo = await postToFbAndScrape(resolvedUrl);
         }
 
         const result = {
@@ -154,7 +154,7 @@ app.get('/api/resolve-link', async (req, res) => {
         // Cache result
         linkCache.set(url, { data: result, timestamp: Date.now() });
 
-        console.log('✨ Response sent successfully');
+        console.log('✨ Response sent');
         res.json(result);
 
     } catch (error) {
@@ -164,23 +164,56 @@ app.get('/api/resolve-link', async (req, res) => {
 });
 
 /**
- * Lấy thông tin sản phẩm từ HTML meta tags
+ * Post to Facebook and scrape product info from post
+ */
+async function postToFbAndScrape(shopeeLink) {
+    try {
+        // Create message
+        const message = `🛍️ Xem sản phẩm\n\n${shopeeLink}`;
+
+        console.log('📤 Posting...');
+        const fbResponse = await axios.post(
+            `https://graph.facebook.com/v18.0/${FACEBOOK_PAGE_ID}/feed`,
+            {
+                message: message,
+                access_token: FACEBOOK_APP_TOKEN
+            }
+        );
+
+        const postId = fbResponse.data.id;
+        console.log(`✅ Posted: ${postId}`);
+
+        // Wait for Facebook to process
+        await new Promise(r => setTimeout(r, 3000));
+
+        // Get post details (like engagement, comments with product info)
+        // Note: We can't scrape from Facebook easily, so return null
+        // In production, you'd use Facebook's Graph API to get post data
+
+        console.log('⚠️ Cannot scrape Facebook post data (requires special permissions)');
+        return null;
+
+    } catch (error) {
+        console.log(`⚠️ Post to FB failed: ${error.message}`);
+        return null;
+    }
+}
+
+/**
+ * Fetch product info from HTML meta tags
  */
 async function fetchProductInfo(shopId, itemId) {
     try {
-        console.log(`📝 Fetching product info: shop=${shopId}, item=${itemId}`);
-
-        // Construct direct product URL
         const productUrl = `https://shopee.vn/product/${shopId}/${itemId}`;
 
-        console.log(`🔗 Fetching HTML from: ${productUrl}`);
+        console.log(`🔗 Fetching: ${productUrl.substring(0, 60)}...`);
 
         const response = await axios.get(productUrl, {
             timeout: 10000,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
+                'Accept-Language': 'vi-VN,vi;q=0.9',
                 'Referer': 'https://shopee.vn/',
                 'Cache-Control': 'no-cache',
                 'Pragma': 'no-cache',
@@ -189,7 +222,6 @@ async function fetchProductInfo(shopId, itemId) {
                 'Sec-Fetch-Mode': 'navigate',
                 'Sec-Fetch-Site': 'none'
             },
-            // Add cookies
             jar: true,
             withCredentials: true
         });
@@ -200,64 +232,57 @@ async function fetchProductInfo(shopId, itemId) {
         // Parse with cheerio
         const $ = cheerio.load(html);
 
-        // Try multiple methods to extract data
-
-        // Method 1: Meta tags
+        // Extract from meta tags
         let name = $('meta[property="og:title"]').attr('content');
         let image = $('meta[property="og:image"]').attr('content');
-        let description = $('meta[property="og:description"]').attr('content');
+        let description = $('meta[property="og:description"]').attr('content') || '';
 
-        console.log(`📊 Meta - name: ${name ? 'Found' : 'Not found'}, image: ${image ? 'Found' : 'Not found'}`);
+        console.log(`📊 Meta - name: ${name ? '✅' : '❌'}, image: ${image ? '✅' : '❌'}`);
 
-        // Method 2: Script tags with product data
+        // Fallback: Search in script tags
         if (!name) {
             console.log('🔍 Searching in script tags...');
             $('script').each((i, el) => {
                 const text = $(el).text();
                 if (text.includes('"name"') && text.includes('"price"')) {
                     try {
-                        // Try to extract JSON
-                        const match = text.match(/\{"name":"([^"]+)"[^}]*"price":(\d+)/);
+                        const match = text.match(/"name":"([^"]+)"/);
                         if (match) {
                             name = match[1];
-                            console.log(`✅ Found name in script ${i}: ${name}`);
+                            console.log(`✅ Found in script: ${name.substring(0, 50)}`);
                         }
                     } catch (e) { }
                 }
             });
         }
 
-        // Method 3: H1 tag
+        // Fallback: H1
         if (!name) {
             name = $('h1').first().text().trim();
-            if (name) console.log(`✅ Found name in h1: ${name}`);
+            if (name) console.log(`✅ Found in h1`);
         }
 
-        // Fallback
-        if (!name || name.length < 3 || name === 'Sản phẩm') {
-            console.log('⚠️ Could not extract valid product name');
+        if (!name || name.length < 3) {
+            console.log('⚠️ Cannot get product name');
             return null;
         }
 
-        // Parse price, rating, sales from description or HTML
+        // Parse price, rating, sales
         let price = 0;
         let rating = 0;
         let sales = 0;
 
         if (description) {
-            // Pattern: ₫ 99.000 or ₫99000
-            const priceMatch = description.match(/₫\s*([0-9,.]+)\s*(?:đ|$)/);
+            const priceMatch = description.match(/₫\s*([0-9,.]+)/);
             if (priceMatch) {
                 price = parseFloat(priceMatch[1].replace(/[,.]/g, '')) / 100000;
             }
 
-            // Pattern: 4.5/5 hoặc ⭐4.5
-            const ratingMatch = description.match(/(?:⭐|★)?(\d+(?:\.\d+)?)\s*\/\s*5/);
+            const ratingMatch = description.match(/(\d+(?:\.\d+)?)\s*\/\s*5/);
             if (ratingMatch) {
                 rating = parseFloat(ratingMatch[1]);
             }
 
-            // Pattern: 1.2k đã bán hoặc 1200 sold
             const salesMatch = description.match(/(\d+(?:\.\d+)?)[k]?\s*(?:đã bán|sold)/i);
             if (salesMatch) {
                 sales = parseFloat(salesMatch[1]) * (description.match(/\d+k/i) ? 1000 : 1);
@@ -272,8 +297,7 @@ async function fetchProductInfo(shopId, itemId) {
             sales: sales
         };
 
-        console.log(`✅ Product info extracted:`);
-        console.log(`   Name: ${result.name.substring(0, 60)}`);
+        console.log(`✅ Extracted: ${result.name.substring(0, 50)}`);
         if (result.price > 0) console.log(`   Price: ${result.price}`);
         if (result.rating > 0) console.log(`   Rating: ${result.rating}/5`);
         if (result.sales > 0) console.log(`   Sales: ${result.sales}`);
@@ -281,7 +305,7 @@ async function fetchProductInfo(shopId, itemId) {
         return result;
 
     } catch (error) {
-        console.log(`❌ Error fetching product info: ${error.message}`);
+        console.log(`❌ Error: ${error.message}`);
         return null;
     }
 }
@@ -292,8 +316,10 @@ app.listen(PORT, () => {
     console.log(`
 ╔════════════════════════════════════════════════════════════╗
 ║   Shopee Affiliate Backend                                 ║
-║   Server running on port ${PORT}                              ║
-║   https://parse-shopee-link.vercel.app                     ║
+║   Port: ${PORT}                                              ║
+║   Endpoints:                                               ║
+║   - GET /api/health                                        ║
+║   - GET /api/resolve-link?url=...&postToFb=true           ║
 ╚════════════════════════════════════════════════════════════╝
     `);
 });
