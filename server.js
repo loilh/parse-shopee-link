@@ -124,14 +124,13 @@ app.get('/api/resolve-link', async (req, res) => {
 
         console.log(`📝 shop=${shopId}, item=${itemId}`);
 
-        // Lấy product info + comment FB song song
+        // Comment short URL → FB crawl → đọc lại attachment từ comment
         let productInfo = null;
         let facebookPostId = null;
         if (FACEBOOK_APP_TOKEN) {
-            // Post tạm với link → FB dùng full crawler (giống Messenger) → đọc lại → xóa post
-            productInfo = await getProductInfoViaFbPost(url);  // short URL gốc
-            // Comment short URL vào post ngày hôm nay (giữ affiliate tracking)
-            facebookPostId = await commentToFacebook(url, productInfo);
+            const { postId, productInfo: info } = await commentAndGetInfo(url);
+            productInfo = info;
+            facebookPostId = postId;
         }
 
         const result = { originalUrl: url, resolvedUrl: cleanUrl, productInfo, facebookPostId, cached: false };
@@ -149,88 +148,7 @@ app.get('/api/resolve-link', async (req, res) => {
 // ==================== FACEBOOK ====================
 
 /**
- * Lấy product info bằng cách POST link lên FB feed (private) rồi đọc lại link preview
- *
- * Khi POST với `link` param, Facebook dùng FULL crawler (giống Messenger)
- * → crawl JS, lấy đúng product OG → ta đọc fields name/description/picture → xóa post
- */
-async function getProductInfoViaFbPost(shortUrl) {
-    let tempPostId = null;
-    try {
-        console.log('🕷️  Post tạm lên FB để lấy link preview...');
-
-        // Post public với `link` param → FB crawl đúng (draft không trigger crawl)
-        const postRes = await axios.post(
-            `https://graph.facebook.com/v22.0/${FACEBOOK_PAGE_ID}/feed`,
-            {
-                message: '🔍',
-                link: shortUrl,
-                access_token: FACEBOOK_APP_TOKEN
-            }
-        );
-        tempPostId = postRes.data.id;
-        console.log(`   Post tạm: ${tempPostId}`);
-
-        // Chờ FB crawl xong (async)
-        await new Promise(r => setTimeout(r, 3000));
-
-        // Đọc lại link preview
-        const readRes = await axios.get(
-            `https://graph.facebook.com/v22.0/${tempPostId}`,
-            {
-                params: {
-                    fields: 'attachments{title,description,media,url,type}',
-                    access_token: FACEBOOK_APP_TOKEN
-                }
-            }
-        );
-
-        const rawAttachment = readRes.data?.attachments?.data?.[0] || {};
-        console.log(`   Attachment raw:`, JSON.stringify(rawAttachment).substring(0, 300));
-
-        const attachment = rawAttachment;
-        const title = attachment.title || '';
-        const description = attachment.description || '';
-        const imageUrl = attachment.media?.image?.src || '';
-
-        if (!title || title.toLowerCase().startsWith('shopee việt nam')) {
-            console.log('⚠️ FB link preview: vẫn chỉ có homepage title');
-            return null;
-        }
-
-        // Shopee OG description là text marketing, không có rating/sales/price
-        // → chỉ lấy được name + image từ FB attachment
-        const productInfo = {
-            name: title.replace(/\s*\|\s*Shopee.*$/i, '').trim().substring(0, 200),
-            image: imageUrl.startsWith('http') ? imageUrl : '',
-            price: 0,
-            rating: 0,
-            sales: 0
-        };
-
-        console.log(`✅ Product: ${productInfo.name.substring(0, 60)}`);
-        console.log(`   🖼️  Image: ${productInfo.image ? 'có' : 'không'}`);
-        return productInfo;
-
-    } catch (e) {
-        console.log(`⚠️ FB post tạm lỗi: ${e.message}`);
-        if (e.response) console.log('   ', JSON.stringify(e.response.data));
-        return null;
-    } finally {
-        // Xóa post tạm dù thành công hay lỗi
-        if (tempPostId) {
-            try {
-                await axios.delete(`https://graph.facebook.com/v22.0/${tempPostId}`, {
-                    params: { access_token: FACEBOOK_APP_TOKEN }
-                });
-                console.log(`🗑️  Đã xóa post tạm`);
-            } catch (_) {}
-        }
-    }
-}
-
-/**
- * Tạo post mới mỗi ngày, link mới → comment vào post đó
+ * Lấy daily post (tạo mới nếu chưa có hôm nay)
  */
 async function getOrCreateDailyPost() {
     const today = new Date().toISOString().split('T')[0];
@@ -255,25 +173,64 @@ async function getOrCreateDailyPost() {
     return dailyPost.id;
 }
 
-async function commentToFacebook(shopeeLink, productInfo) {
+/**
+ * Comment short URL vào daily post → FB crawl link → đọc attachment từ comment
+ * Không cần post tạm, không cần xóa — gọn hơn, nhanh hơn
+ */
+async function commentAndGetInfo(shortUrl) {
     try {
         const postId = await getOrCreateDailyPost();
 
-        const text = productInfo?.name
-            ? `${productInfo.name.substring(0, 80)}${productInfo.price > 0 ? `\n💰 ${productInfo.price}k` : ''}${productInfo.rating > 0 ? `  ⭐ ${productInfo.rating}/5` : ''}\n${shopeeLink}`
-            : shopeeLink;
-
-        await axios.post(
+        // Comment short URL — FB sẽ crawl và đính attachment
+        console.log('💬 Commenting...');
+        const commentRes = await axios.post(
             `https://graph.facebook.com/v22.0/${postId}/comments`,
-            { message: text, access_token: FACEBOOK_APP_TOKEN }
+            { message: shortUrl, access_token: FACEBOOK_APP_TOKEN }
         );
-        console.log(`💬 Comment → post ${postId}`);
-        return postId;
+        const commentId = commentRes.data.id;
+        console.log(`   Comment ID: ${commentId}`);
+
+        // Chờ FB crawl link trong comment
+        await new Promise(r => setTimeout(r, 1500));
+
+        // Đọc attachment từ comment
+        const readRes = await axios.get(
+            `https://graph.facebook.com/v22.0/${commentId}`,
+            {
+                params: {
+                    fields: 'attachment{title,media,url,type}',
+                    access_token: FACEBOOK_APP_TOKEN
+                }
+            }
+        );
+
+        const att = readRes.data?.attachment || {};
+        const title = att.title || '';
+        const imageUrl = att.media?.image?.src || '';
+
+        console.log(`   Attachment: "${title.substring(0, 60)}"`);
+
+        let productInfo = null;
+        if (title && !title.toLowerCase().startsWith('shopee việt nam')) {
+            productInfo = {
+                name: title.replace(/\s*\|\s*Shopee.*$/i, '').trim().substring(0, 200),
+                image: imageUrl.startsWith('http') ? imageUrl : '',
+                price: 0,
+                rating: 0,
+                sales: 0
+            };
+            console.log(`✅ Product: ${productInfo.name.substring(0, 60)}`);
+            console.log(`   🖼️  Image: ${productInfo.image ? 'có' : 'không'}`);
+        } else {
+            console.log('⚠️ Không lấy được product info từ comment attachment');
+        }
+
+        return { postId, productInfo };
 
     } catch (e) {
         console.log(`⚠️ Comment lỗi: ${e.message}`);
         if (e.response) console.log('   ', JSON.stringify(e.response.data));
-        return null;
+        return { postId: null, productInfo: null };
     }
 }
 
