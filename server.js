@@ -176,7 +176,7 @@ async function getProductInfoViaFbPost(shortUrl) {
         const description = attachment.description || '';
         const imageUrl = attachment.media?.image?.src || '';
 
-        if (!title || title.toLowerCase().includes('shopee việt nam')) {
+        if (!title || title.toLowerCase().startsWith('shopee việt nam')) {
             console.log('⚠️ FB link preview: vẫn chỉ có homepage title');
             return null;
         }
