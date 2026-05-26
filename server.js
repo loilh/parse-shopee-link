@@ -1,7 +1,5 @@
 const express = require('express');
 const axios = require('axios');
-const https = require('https');
-const http = require('http');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
@@ -78,30 +76,18 @@ app.get('/api/resolve-link', async (req, res) => {
             linkCache.delete(url);
         }
 
-        // 1️⃣ Resolve short URL nếu cần (s.shopee.vn → URL đầy đủ)
-        let resolvedUrl = url;
-        if (!extractNameFromUrl(url)) {
-            console.log('🔗 Resolving redirect...');
-            resolvedUrl = await resolveRedirects(url);
-            console.log(`   → ${resolvedUrl.substring(0, 90)}`);
-        }
-
-        // 2️⃣ Chuẩn hoá URL (xử lý mobile format, bỏ credential_token)
-        const cleanUrl = toCleanShopeeUrl(resolvedUrl);
-        if (cleanUrl !== resolvedUrl) console.log(`🧹 Clean URL: ${cleanUrl.substring(0, 90)}`);
-
-        // 3️⃣ Lấy tên từ URL path ngay lập tức (0ms)
-        const urlName = extractNameFromUrl(cleanUrl);
+        // 1️⃣ Lấy tên từ URL path ngay lập tức (0ms) — chỉ có khi là URL đầy đủ
+        const urlName = extractNameFromUrl(url);
         if (urlName) console.log(`📝 URL name: ${urlName.substring(0, 60)}`);
 
-        // 4️⃣ FB để lấy image (và tên chính xác hơn nếu có)
+        // 2️⃣ FB: post URL gốc, để FB tự follow redirect và crawl
         let productInfo = null;
         let postId = null;
         if (FACEBOOK_APP_TOKEN) {
-            ({ postId, productInfo } = await commentAndGetInfo(cleanUrl));
+            ({ postId, productInfo } = await commentAndGetInfo(url));
         }
 
-        // 5️⃣ Nếu FB fail → dùng tên từ URL (không có image)
+        // 3️⃣ Nếu FB fail → dùng tên từ URL (không có image)
         if (!productInfo && urlName) {
             console.log('📌 Dùng tên từ URL (không có image)');
             productInfo = { name: urlName, image: '' };
@@ -120,28 +106,6 @@ app.get('/api/resolve-link', async (req, res) => {
 });
 
 // ==================== URL UTILS ====================
-
-// Chuẩn hoá URL Shopee:
-//   - Mobile: /shopname/SHOPID/ITEMID?__mobile__=1&credential_token=...
-//     → https://shopee.vn/product/SHOPID/ITEMID
-//   - Desktop bình thường: giữ nguyên
-function toCleanShopeeUrl(url) {
-    try {
-        const u = new URL(url);
-        if (!u.hostname.includes('shopee')) return url;
-
-        // Mobile format: /<shopname>/<shopid>/<itemid>
-        // shopid & itemid là số dài ≥ 6 chữ số
-        const m = u.pathname.match(/^\/[^\/]+\/(\d{6,})\/(\d{6,})$/);
-        if (m) {
-            return `https://shopee.vn/product/${m[1]}/${m[2]}`;
-        }
-
-        return url;
-    } catch (_) {
-        return url;
-    }
-}
 
 // Extract tên sản phẩm từ URL path Shopee
 // URL dạng: /Tên-Sản-Phẩm-i.SHOPID.ITEMID
@@ -163,34 +127,6 @@ function extractNameFromUrl(url) {
     } catch (_) {
         return null;
     }
-}
-
-// ==================== REDIRECT RESOLVER ====================
-
-// Follow HTTP redirects bằng Node native — đáng tin hơn axios
-// Chỉ đọc response headers, không download body
-function resolveRedirects(url, maxHops = 10) {
-    return new Promise((resolve) => {
-        if (maxHops <= 0) return resolve(url);
-
-        const mod = url.startsWith('https') ? https : http;
-        const req = mod.get(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            },
-        }, (res) => {
-            res.destroy(); // không cần body
-            const loc = res.headers['location'];
-            if (loc && [301, 302, 303, 307, 308].includes(res.statusCode)) {
-                const next = loc.startsWith('http') ? loc : new URL(loc, url).href;
-                resolveRedirects(next, maxHops - 1).then(resolve);
-            } else {
-                resolve(url);
-            }
-        });
-        req.on('error', () => resolve(url));
-        req.setTimeout(5000, () => { req.destroy(); resolve(url); });
-    });
 }
 
 // ==================== FACEBOOK ====================
