@@ -1,7 +1,5 @@
 const express = require('express');
 const axios = require('axios');
-const fs = require('fs');
-const path = require('path');
 require('dotenv').config();
 
 const app = express();
@@ -18,22 +16,9 @@ const FACEBOOK_APP_TOKEN = process.env.FACEBOOK_APP_TOKEN || '';
 const linkCache = new Map();
 const CACHE_TIME = 1000 * 60 * 60;
 
-// Daily post — lưu file để không mất khi restart
-const STATE_FILE = path.join(__dirname, '.daily-post.json');
-
-function loadDailyPost() {
-    try {
-        if (fs.existsSync(STATE_FILE))
-            return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    } catch (_) {}
-    return { id: null, date: null };
-}
-
-function saveDailyPost(data) {
-    try { fs.writeFileSync(STATE_FILE, JSON.stringify(data)); } catch (_) {}
-}
-
-let dailyPost = loadDailyPost();
+// Daily post — cache in-memory (best-effort, serverless safe)
+// Source of truth là Facebook feed, không phải local state
+let dailyPost = { id: null, date: null };
 
 // ==================== MIDDLEWARE ====================
 
@@ -131,26 +116,60 @@ function extractNameFromUrl(url) {
 
 // ==================== FACEBOOK ====================
 
-async function getOrCreateDailyPost() {
-    const today = new Date().toISOString().split('T')[0];
+// Prefix nhận diện post hôm nay trong feed
+function dailyPostMessage(date) {
+    return `🛍️ Shopee hay ngày ${date}`;
+}
 
+async function getOrCreateDailyPost() {
+    // Timezone Vietnam (UTC+7)
+    const today = new Date(Date.now() + 7 * 60 * 60 * 1000)
+        .toISOString().split('T')[0];
+
+    // 1️⃣ In-memory cache còn hợp lệ → dùng luôn (tránh gọi FB API)
     if (dailyPost.id && dailyPost.date === today) {
-        console.log(`📌 Post hôm nay: ${dailyPost.id}`);
+        console.log(`📌 Cache: post hôm nay ${dailyPost.id}`);
         return dailyPost.id;
     }
 
+    // 2️⃣ Tìm post hôm nay trên feed FB (source of truth cho serverless)
+    console.log(`🔍 Tìm post ngày ${today} trên feed...`);
+    try {
+        const feedRes = await axios.get(
+            `https://graph.facebook.com/v22.0/${FACEBOOK_PAGE_ID}/feed`,
+            {
+                params: {
+                    fields: 'id,message,created_time',
+                    limit: 10,
+                    access_token: FACEBOOK_APP_TOKEN
+                }
+            }
+        );
+        const prefix = dailyPostMessage(today);
+        const existing = (feedRes.data?.data || []).find(
+            p => p.message && p.message.startsWith(prefix)
+        );
+        if (existing) {
+            console.log(`✅ Tìm thấy post hôm nay: ${existing.id}`);
+            dailyPost = { id: existing.id, date: today };
+            return dailyPost.id;
+        }
+    } catch (e) {
+        console.log(`⚠️ Không đọc được feed: ${e.message}`);
+    }
+
+    // 3️⃣ Chưa có → tạo mới
     console.log(`📝 Tạo post mới ngày ${today}...`);
     const r = await axios.post(
         `https://graph.facebook.com/v22.0/${FACEBOOK_PAGE_ID}/feed`,
         {
-            message: `🛍️ Shopee hay ngày ${today}\n\nCác link sản phẩm bên dưới 👇`,
+            message: `${dailyPostMessage(today)}\n\nCác link sản phẩm bên dưới 👇`,
             access_token: FACEBOOK_APP_TOKEN
         }
     );
 
     dailyPost = { id: r.data.id, date: today };
-    saveDailyPost(dailyPost);
-    console.log(`✅ Post: ${dailyPost.id}`);
+    console.log(`✅ Post mới: ${dailyPost.id}`);
     return dailyPost.id;
 }
 
