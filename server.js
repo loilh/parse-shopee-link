@@ -76,10 +76,15 @@ app.get('/api/resolve-link', async (req, res) => {
             linkCache.delete(url);
         }
 
-        // Comment lên FB → đọc attachment → lấy product info
-        const { postId, productInfo } = FACEBOOK_APP_TOKEN
-            ? await commentAndGetInfo(url)
-            : { postId: null, productInfo: null };
+        // 1️⃣ Thử direct OG fetch trước (nhanh ~200-400ms)
+        let productInfo = await fetchOgDirect(url);
+        let postId = null;
+
+        // 2️⃣ Fallback: Facebook comment nếu direct thất bại
+        if (!productInfo && FACEBOOK_APP_TOKEN) {
+            console.log('↩️  Fallback → Facebook...');
+            ({ postId, productInfo } = await commentAndGetInfo(url));
+        }
 
         const result = { url, productInfo, facebookPostId: postId, cached: false };
         linkCache.set(url, { data: result, timestamp: Date.now() });
@@ -92,6 +97,73 @@ app.get('/api/resolve-link', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+
+// ==================== DIRECT OG FETCH ====================
+
+// Decode các HTML entities thường gặp trong og:title
+function decodeHtmlEntities(str) {
+    return str
+        .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+        .replace(/&amp;/g, '&')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>');
+}
+
+function parseOgTag(html, property) {
+    // Hỗ trợ cả 2 thứ tự thuộc tính: property trước hoặc content trước
+    const patterns = [
+        new RegExp(`<meta[^>]*property=["']${property}["'][^>]*content=["']([^"']+)["']`, 'i'),
+        new RegExp(`<meta[^>]*content=["']([^"']+)["'][^>]*property=["']${property}["']`, 'i'),
+    ];
+    for (const re of patterns) {
+        const m = html.match(re);
+        if (m) return decodeHtmlEntities(m[1]);
+    }
+    return '';
+}
+
+async function fetchOgDirect(shortUrl) {
+    try {
+        console.log('🌐 Direct OG fetch...');
+        const response = await axios.get(shortUrl, {
+            maxRedirects: 10,
+            timeout: 7000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+                'Accept': 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8',
+            },
+            // Chỉ cần phần <head> — tránh download toàn bộ trang
+            transformResponse: [(data) => {
+                if (typeof data !== 'string') return data;
+                const headEnd = data.indexOf('</head>');
+                return headEnd !== -1 ? data.slice(0, headEnd + 7) : data.slice(0, 8000);
+            }],
+        });
+
+        const html = typeof response.data === 'string' ? response.data : '';
+        const title = parseOgTag(html, 'og:title');
+        const image = parseOgTag(html, 'og:image');
+
+        if (!title || title.toLowerCase().startsWith('shopee việt nam')) {
+            console.log('⚠️ OG title không hợp lệ');
+            return null;
+        }
+
+        const productInfo = {
+            name: title.replace(/\s*\|\s*Shopee.*$/i, '').trim().substring(0, 200),
+            image: image.startsWith('http') ? image : '',
+        };
+        console.log(`✅ Direct: ${productInfo.name.substring(0, 60)}`);
+        return productInfo;
+
+    } catch (e) {
+        console.log(`⚠️ Direct fetch lỗi: ${e.message}`);
+        return null;
+    }
+}
 
 // ==================== FACEBOOK ====================
 
@@ -130,21 +202,26 @@ async function commentAndGetInfo(shortUrl) {
         );
         const commentId = commentRes.data.id;
 
-        // Chờ FB crawl
-        await new Promise(r => setTimeout(r, 1500));
-
-        // Đọc attachment từ comment
-        const readRes = await axios.get(
-            `https://graph.facebook.com/v22.0/${commentId}`,
-            {
-                params: {
-                    fields: 'attachment{title,media,url,type}',
-                    access_token: FACEBOOK_APP_TOKEN
+        // Poll thay vì chờ cố định — kiểm tra mỗi 400ms, tối đa 5 lần (2s)
+        let att = {};
+        for (let i = 0; i < 5; i++) {
+            await new Promise(r => setTimeout(r, 400));
+            const readRes = await axios.get(
+                `https://graph.facebook.com/v22.0/${commentId}`,
+                {
+                    params: {
+                        fields: 'attachment{title,media,url,type}',
+                        access_token: FACEBOOK_APP_TOKEN
+                    }
                 }
+            );
+            att = readRes.data?.attachment || {};
+            if (att.title) {
+                console.log(`⏱️  FB crawl xong sau ${(i + 1) * 400}ms`);
+                break;
             }
-        );
+        }
 
-        const att = readRes.data?.attachment || {};
         const title = att.title || '';
         const imageUrl = att.media?.image?.src || '';
 
@@ -154,15 +231,15 @@ async function commentAndGetInfo(shortUrl) {
                 name: title.replace(/\s*\|\s*Shopee.*$/i, '').trim().substring(0, 200),
                 image: imageUrl.startsWith('http') ? imageUrl : ''
             };
-            console.log(`✅ ${productInfo.name.substring(0, 60)}`);
+            console.log(`✅ FB: ${productInfo.name.substring(0, 60)}`);
         } else {
-            console.log('⚠️ Không lấy được product info');
+            console.log('⚠️ Không lấy được product info qua FB');
         }
 
         return { postId, productInfo };
 
     } catch (e) {
-        console.log(`⚠️ Lỗi: ${e.message}`);
+        console.log(`⚠️ Lỗi FB: ${e.message}`);
         if (e.response) console.log('  ', JSON.stringify(e.response.data));
         return { postId: null, productInfo: null };
     }
