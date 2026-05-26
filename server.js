@@ -76,11 +76,11 @@ app.get('/api/resolve-link', async (req, res) => {
             linkCache.delete(url);
         }
 
-        // 1️⃣ Thử direct OG fetch trước (nhanh ~200-400ms)
-        let productInfo = await fetchOgDirect(url);
+        // 1️⃣ Shopee API (nhanh ~300-500ms, không cần FB token)
+        let productInfo = await fetchShopeeApi(url);
         let postId = null;
 
-        // 2️⃣ Fallback: Facebook comment nếu direct thất bại
+        // 2️⃣ Fallback: Facebook comment nếu Shopee API thất bại
         if (!productInfo && FACEBOOK_APP_TOKEN) {
             console.log('↩️  Fallback → Facebook...');
             ({ postId, productInfo } = await commentAndGetInfo(url));
@@ -98,69 +98,84 @@ app.get('/api/resolve-link', async (req, res) => {
     }
 });
 
-// ==================== DIRECT OG FETCH ====================
+// ==================== SHOPEE API FETCH ====================
 
-// Decode các HTML entities thường gặp trong og:title
-function decodeHtmlEntities(str) {
-    return str
-        .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
-        .replace(/&amp;/g, '&')
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'")
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>');
-}
-
-function parseOgTag(html, property) {
-    // Hỗ trợ cả 2 thứ tự thuộc tính: property trước hoặc content trước
-    const patterns = [
-        new RegExp(`<meta[^>]*property=["']${property}["'][^>]*content=["']([^"']+)["']`, 'i'),
-        new RegExp(`<meta[^>]*content=["']([^"']+)["'][^>]*property=["']${property}["']`, 'i'),
-    ];
-    for (const re of patterns) {
-        const m = html.match(re);
-        if (m) return decodeHtmlEntities(m[1]);
-    }
-    return '';
-}
-
-async function fetchOgDirect(shortUrl) {
+// Lấy shopid + itemid từ URL Shopee
+// Hỗ trợ dạng: /i.SHOPID.ITEMID, ?shopid=&itemid=, shop.shopee.vn/product/SHOPID/ITEMID
+function parseShopeeIds(url) {
     try {
-        console.log('🌐 Direct OG fetch...');
-        const response = await axios.get(shortUrl, {
-            maxRedirects: 10,
-            timeout: 7000,
+        const u = new URL(url);
+
+        // Dạng phổ biến nhất: path chứa i.{shopid}.{itemid}
+        const pathMatch = u.pathname.match(/i\.(\d+)\.(\d+)/);
+        if (pathMatch) return { shopid: pathMatch[1], itemid: pathMatch[2] };
+
+        // Dạng query string
+        const shopid = u.searchParams.get('shopid');
+        const itemid = u.searchParams.get('itemid');
+        if (shopid && itemid) return { shopid, itemid };
+
+        // Dạng shop.shopee.vn/product/SHOPID/ITEMID
+        const shopMatch = u.pathname.match(/\/product\/(\d+)\/(\d+)/);
+        if (shopMatch) return { shopid: shopMatch[1], itemid: shopMatch[2] };
+
+    } catch (_) {}
+    return null;
+}
+
+async function fetchShopeeApi(url) {
+    // Nếu là short link (s.shopee.vn) → follow redirect trước để lấy URL thật
+    let resolvedUrl = url;
+    if (/s\.shopee\.(vn|com|co\.id|com\.my|ph|com\.br|com\.mx|sg|co\.th)/.test(url)) {
+        try {
+            const r = await axios.head(url, {
+                maxRedirects: 10, timeout: 5000,
+                validateStatus: s => s < 400,
+            });
+            resolvedUrl = r.request?.res?.responseUrl || r.config?.url || url;
+        } catch (_) {}
+    }
+
+    const ids = parseShopeeIds(resolvedUrl);
+    if (!ids) {
+        console.log('⚠️ Không parse được shopid/itemid');
+        return null;
+    }
+
+    console.log(`🛍️  Shopee API: shop=${ids.shopid} item=${ids.itemid}`);
+    try {
+        const resp = await axios.get('https://shopee.vn/api/v4/item/get', {
+            params: { itemid: ids.itemid, shopid: ids.shopid },
+            timeout: 6000,
             headers: {
-                'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
-                'Accept': 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                'Referer': 'https://shopee.vn/',
+                'Accept': 'application/json',
+                'x-api-source': 'pc',
+                'x-shopee-language': 'vi',
             },
-            // Chỉ cần phần <head> — tránh download toàn bộ trang
-            transformResponse: [(data) => {
-                if (typeof data !== 'string') return data;
-                const headEnd = data.indexOf('</head>');
-                return headEnd !== -1 ? data.slice(0, headEnd + 7) : data.slice(0, 8000);
-            }],
         });
 
-        const html = typeof response.data === 'string' ? response.data : '';
-        const title = parseOgTag(html, 'og:title');
-        const image = parseOgTag(html, 'og:image');
-
-        if (!title || title.toLowerCase().startsWith('shopee việt nam')) {
-            console.log('⚠️ OG title không hợp lệ');
+        const item = resp.data?.data?.item;
+        if (!item) {
+            console.log('⚠️ Shopee API không trả data');
             return null;
         }
 
-        const productInfo = {
-            name: title.replace(/\s*\|\s*Shopee.*$/i, '').trim().substring(0, 200),
-            image: image.startsWith('http') ? image : '',
-        };
-        console.log(`✅ Direct: ${productInfo.name.substring(0, 60)}`);
-        return productInfo;
+        const name = (item.name || '').trim().substring(0, 200);
+        // images[] là mảng hash; ghép thành URL CDN
+        const imgHash = item.image || (item.images && item.images[0]) || '';
+        const image = imgHash
+            ? `https://down-vn.img.susercontent.com/file/${imgHash}`
+            : '';
+
+        if (!name) return null;
+
+        console.log(`✅ Shopee API: ${name.substring(0, 60)}`);
+        return { name, image };
 
     } catch (e) {
-        console.log(`⚠️ Direct fetch lỗi: ${e.message}`);
+        console.log(`⚠️ Shopee API lỗi: ${e.message}`);
         return null;
     }
 }
