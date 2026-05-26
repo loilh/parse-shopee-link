@@ -86,18 +86,22 @@ app.get('/api/resolve-link', async (req, res) => {
             console.log(`   → ${resolvedUrl.substring(0, 90)}`);
         }
 
-        // 2️⃣ Lấy tên từ URL path ngay lập tức (0ms)
-        const urlName = extractNameFromUrl(resolvedUrl);
+        // 2️⃣ Chuẩn hoá URL (xử lý mobile format, bỏ credential_token)
+        const cleanUrl = toCleanShopeeUrl(resolvedUrl);
+        if (cleanUrl !== resolvedUrl) console.log(`🧹 Clean URL: ${cleanUrl.substring(0, 90)}`);
+
+        // 3️⃣ Lấy tên từ URL path ngay lập tức (0ms)
+        const urlName = extractNameFromUrl(cleanUrl);
         if (urlName) console.log(`📝 URL name: ${urlName.substring(0, 60)}`);
 
-        // 3️⃣ FB để lấy image (và tên chính xác hơn nếu có)
+        // 4️⃣ FB để lấy image (và tên chính xác hơn nếu có)
         let productInfo = null;
         let postId = null;
         if (FACEBOOK_APP_TOKEN) {
-            ({ postId, productInfo } = await commentAndGetInfo(resolvedUrl));
+            ({ postId, productInfo } = await commentAndGetInfo(cleanUrl));
         }
 
-        // 4️⃣ Nếu FB fail → dùng tên từ URL (không có image)
+        // 5️⃣ Nếu FB fail → dùng tên từ URL (không có image)
         if (!productInfo && urlName) {
             console.log('📌 Dùng tên từ URL (không có image)');
             productInfo = { name: urlName, image: '' };
@@ -115,10 +119,32 @@ app.get('/api/resolve-link', async (req, res) => {
     }
 });
 
-// ==================== URL NAME EXTRACTION ====================
+// ==================== URL UTILS ====================
+
+// Chuẩn hoá URL Shopee:
+//   - Mobile: /shopname/SHOPID/ITEMID?__mobile__=1&credential_token=...
+//     → https://shopee.vn/product/SHOPID/ITEMID
+//   - Desktop bình thường: giữ nguyên
+function toCleanShopeeUrl(url) {
+    try {
+        const u = new URL(url);
+        if (!u.hostname.includes('shopee')) return url;
+
+        // Mobile format: /<shopname>/<shopid>/<itemid>
+        // shopid & itemid là số dài ≥ 6 chữ số
+        const m = u.pathname.match(/^\/[^\/]+\/(\d{6,})\/(\d{6,})$/);
+        if (m) {
+            return `https://shopee.vn/product/${m[1]}/${m[2]}`;
+        }
+
+        return url;
+    } catch (_) {
+        return url;
+    }
+}
 
 // Extract tên sản phẩm từ URL path Shopee
-// URL dạng: /Tên-Sản-Phẩm-i.SHOPID.ITEMID hoặc /shop/Tên-i.SHOPID.ITEMID
+// URL dạng: /Tên-Sản-Phẩm-i.SHOPID.ITEMID
 function extractNameFromUrl(url) {
     try {
         const pathname = new URL(url).pathname;
