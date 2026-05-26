@@ -78,14 +78,29 @@ app.get('/api/resolve-link', async (req, res) => {
             linkCache.delete(url);
         }
 
-        // 1️⃣ Shopee API (nhanh ~300-500ms, không cần FB token)
-        let productInfo = await fetchShopeeApi(url);
-        let postId = null;
+        // 1️⃣ Resolve short URL nếu cần (s.shopee.vn → URL đầy đủ)
+        let resolvedUrl = url;
+        if (!extractNameFromUrl(url)) {
+            console.log('🔗 Resolving redirect...');
+            resolvedUrl = await resolveRedirects(url);
+            console.log(`   → ${resolvedUrl.substring(0, 90)}`);
+        }
 
-        // 2️⃣ Fallback: Facebook comment nếu Shopee API thất bại
-        if (!productInfo && FACEBOOK_APP_TOKEN) {
-            console.log('↩️  Fallback → Facebook...');
-            ({ postId, productInfo } = await commentAndGetInfo(url));
+        // 2️⃣ Lấy tên từ URL path ngay lập tức (0ms)
+        const urlName = extractNameFromUrl(resolvedUrl);
+        if (urlName) console.log(`📝 URL name: ${urlName.substring(0, 60)}`);
+
+        // 3️⃣ FB để lấy image (và tên chính xác hơn nếu có)
+        let productInfo = null;
+        let postId = null;
+        if (FACEBOOK_APP_TOKEN) {
+            ({ postId, productInfo } = await commentAndGetInfo(resolvedUrl));
+        }
+
+        // 4️⃣ Nếu FB fail → dùng tên từ URL (không có image)
+        if (!productInfo && urlName) {
+            console.log('📌 Dùng tên từ URL (không có image)');
+            productInfo = { name: urlName, image: '' };
         }
 
         const result = { url, productInfo, facebookPostId: postId, cached: false };
@@ -100,32 +115,33 @@ app.get('/api/resolve-link', async (req, res) => {
     }
 });
 
-// ==================== SHOPEE API FETCH ====================
+// ==================== URL NAME EXTRACTION ====================
 
-// Lấy shopid + itemid từ URL Shopee
-// Hỗ trợ dạng: /i.SHOPID.ITEMID, ?shopid=&itemid=, shop.shopee.vn/product/SHOPID/ITEMID
-function parseShopeeIds(url) {
+// Extract tên sản phẩm từ URL path Shopee
+// URL dạng: /Tên-Sản-Phẩm-i.SHOPID.ITEMID hoặc /shop/Tên-i.SHOPID.ITEMID
+function extractNameFromUrl(url) {
     try {
-        const u = new URL(url);
+        const pathname = new URL(url).pathname;
 
-        // Dạng phổ biến nhất: path chứa i.{shopid}.{itemid}
-        const pathMatch = u.pathname.match(/i\.(\d+)\.(\d+)/);
-        if (pathMatch) return { shopid: pathMatch[1], itemid: pathMatch[2] };
+        // Dạng chuẩn: /Tên-SP-i.SHOPID.ITEMID
+        const match = pathname.match(/^\/(.+?)-i\.\d+\.\d+/);
+        if (!match) return null;
 
-        // Dạng query string
-        const shopid = u.searchParams.get('shopid');
-        const itemid = u.searchParams.get('itemid');
-        if (shopid && itemid) return { shopid, itemid };
+        const name = match[1]
+            .replace(/-/g, ' ')
+            .trim()
+            .substring(0, 200);
 
-        // Dạng shop.shopee.vn/product/SHOPID/ITEMID
-        const shopMatch = u.pathname.match(/\/product\/(\d+)\/(\d+)/);
-        if (shopMatch) return { shopid: shopMatch[1], itemid: shopMatch[2] };
-
-    } catch (_) {}
-    return null;
+        // Bỏ qua nếu tên quá ngắn (có thể là path khác)
+        return name.length >= 5 ? name : null;
+    } catch (_) {
+        return null;
+    }
 }
 
-// Follow HTTP redirects bằng Node native — đáng tin hơn axios.head
+// ==================== REDIRECT RESOLVER ====================
+
+// Follow HTTP redirects bằng Node native — đáng tin hơn axios
 // Chỉ đọc response headers, không download body
 function resolveRedirects(url, maxHops = 10) {
     return new Promise((resolve) => {
@@ -143,65 +159,12 @@ function resolveRedirects(url, maxHops = 10) {
                 const next = loc.startsWith('http') ? loc : new URL(loc, url).href;
                 resolveRedirects(next, maxHops - 1).then(resolve);
             } else {
-                resolve(url); // URL cuối
+                resolve(url);
             }
         });
         req.on('error', () => resolve(url));
         req.setTimeout(5000, () => { req.destroy(); resolve(url); });
     });
-}
-
-async function fetchShopeeApi(url) {
-    // Resolve trước nếu chưa có shopid/itemid trong URL
-    let resolvedUrl = url;
-    if (!parseShopeeIds(url)) {
-        console.log('🔗 Resolving redirect...');
-        resolvedUrl = await resolveRedirects(url);
-        console.log(`   → ${resolvedUrl.substring(0, 90)}`);
-    }
-
-    const ids = parseShopeeIds(resolvedUrl);
-    if (!ids) {
-        console.log('⚠️ Không parse được shopid/itemid');
-        return null;
-    }
-
-    console.log(`🛍️  Shopee API: shop=${ids.shopid} item=${ids.itemid}`);
-    try {
-        const resp = await axios.get('https://shopee.vn/api/v4/item/get', {
-            params: { itemid: ids.itemid, shopid: ids.shopid },
-            timeout: 6000,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                'Referer': 'https://shopee.vn/',
-                'Accept': 'application/json',
-                'x-api-source': 'pc',
-                'x-shopee-language': 'vi',
-            },
-        });
-
-        const item = resp.data?.data?.item;
-        if (!item) {
-            console.log('⚠️ Shopee API không trả data');
-            return null;
-        }
-
-        const name = (item.name || '').trim().substring(0, 200);
-        // images[] là mảng hash; ghép thành URL CDN
-        const imgHash = item.image || (item.images && item.images[0]) || '';
-        const image = imgHash
-            ? `https://down-vn.img.susercontent.com/file/${imgHash}`
-            : '';
-
-        if (!name) return null;
-
-        console.log(`✅ Shopee API: ${name.substring(0, 60)}`);
-        return { name, image };
-
-    } catch (e) {
-        console.log(`⚠️ Shopee API lỗi: ${e.message}`);
-        return null;
-    }
 }
 
 // ==================== FACEBOOK ====================
@@ -229,15 +192,15 @@ async function getOrCreateDailyPost() {
     return dailyPost.id;
 }
 
-async function commentAndGetInfo(shortUrl) {
+async function commentAndGetInfo(url) {
     try {
         const postId = await getOrCreateDailyPost();
 
-        // Comment short URL → FB crawl và đính attachment
+        // Comment URL → FB crawl và đính attachment
         console.log('💬 Commenting...');
         const commentRes = await axios.post(
             `https://graph.facebook.com/v22.0/${postId}/comments`,
-            { message: shortUrl, access_token: FACEBOOK_APP_TOKEN }
+            { message: url, access_token: FACEBOOK_APP_TOKEN }
         );
         const commentId = commentRes.data.id;
 
@@ -272,7 +235,7 @@ async function commentAndGetInfo(shortUrl) {
             };
             console.log(`✅ FB: ${productInfo.name.substring(0, 60)}`);
         } else {
-            console.log('⚠️ Không lấy được product info qua FB');
+            console.log('⚠️ FB không lấy được title');
         }
 
         return { postId, productInfo };
