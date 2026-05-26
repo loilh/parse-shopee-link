@@ -1,5 +1,7 @@
 const express = require('express');
 const axios = require('axios');
+const https = require('https');
+const http = require('http');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
@@ -123,17 +125,39 @@ function parseShopeeIds(url) {
     return null;
 }
 
+// Follow HTTP redirects bằng Node native — đáng tin hơn axios.head
+// Chỉ đọc response headers, không download body
+function resolveRedirects(url, maxHops = 10) {
+    return new Promise((resolve) => {
+        if (maxHops <= 0) return resolve(url);
+
+        const mod = url.startsWith('https') ? https : http;
+        const req = mod.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            },
+        }, (res) => {
+            res.destroy(); // không cần body
+            const loc = res.headers['location'];
+            if (loc && [301, 302, 303, 307, 308].includes(res.statusCode)) {
+                const next = loc.startsWith('http') ? loc : new URL(loc, url).href;
+                resolveRedirects(next, maxHops - 1).then(resolve);
+            } else {
+                resolve(url); // URL cuối
+            }
+        });
+        req.on('error', () => resolve(url));
+        req.setTimeout(5000, () => { req.destroy(); resolve(url); });
+    });
+}
+
 async function fetchShopeeApi(url) {
-    // Nếu là short link (s.shopee.vn) → follow redirect trước để lấy URL thật
+    // Resolve trước nếu chưa có shopid/itemid trong URL
     let resolvedUrl = url;
-    if (/s\.shopee\.(vn|com|co\.id|com\.my|ph|com\.br|com\.mx|sg|co\.th)/.test(url)) {
-        try {
-            const r = await axios.head(url, {
-                maxRedirects: 10, timeout: 5000,
-                validateStatus: s => s < 400,
-            });
-            resolvedUrl = r.request?.res?.responseUrl || r.config?.url || url;
-        } catch (_) {}
+    if (!parseShopeeIds(url)) {
+        console.log('🔗 Resolving redirect...');
+        resolvedUrl = await resolveRedirects(url);
+        console.log(`   → ${resolvedUrl.substring(0, 90)}`);
     }
 
     const ids = parseShopeeIds(resolvedUrl);
